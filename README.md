@@ -30,16 +30,6 @@ To run AnalogCircuitDSP, you'll need Python 3 and a few common libraries.
 * Python 3.8+
 * `numpy` (for numerical operations)
 
-### Installation
-
-1.  **Clone the repository:**
-    ```bash
-    git clone [https://github.com/your-username/AnalogCircuitDSP.git](https://github.com/your-username/AnalogCircuitDSP.git) # Updated project name
-    cd AnalogCircuitDSP
-    ```
-2.  **Install dependencies:**
-    ```bash
-    pip install numpy
-    ```
+### 
 
 ### Project Structure
