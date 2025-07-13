@@ -1,86 +1,80 @@
+# components/led.py
+
 import numpy as np
-from utils.constants import Q, K, T_ROOM, VT_ROOM # Importa costanti fisiche
+from utils.constants import Q, K, T_ROOM, VT_ROOM
 
-class Diode:
-    """
-    Modello fisico per un diodo standard (equazione di Shockley).
-    """
-    def __init__(self, saturation_current=1e-12, ideality_factor=1.0, temperature_k=T_ROOM):
-        """
-        Inizializza il diodo.
+class LED:
+    def __init__(self, saturation_current=1e-20, emission_coefficient=3.4, breakdown_voltage=-5.0, luminous_efficiency=100.0):
+        # Parametri del diodo (diodo con una caduta di tensione maggiore)
+        self.Is = float(saturation_current) # Corrente di saturazione inversa (molto bassa per LED)
+        self.n = float(emission_coefficient) # Coefficiente di emissione più alto per LED
+        self.Vt = VT_ROOM # Tensione termica
+        self.Vf_typical = 1.8 # Tensione di forward tipica per l'accensione
+        self.Rs = 1.0 # Resistenza in serie interna per modellare la pendenza dopo Vf
 
-        Args:
-            saturation_current (float): Corrente di saturazione inversa (Is) in Ampere. Default 1e-12A.
-            ideality_factor (float): Fattore di idealità (n). Default 1.0.
-            temperature_k (float): Temperatura in Kelvin. Default temperatura ambiente.
-        """
-        if saturation_current <= 0:
-            raise ValueError("La corrente di saturazione deve essere un valore positivo.")
-        if ideality_factor <= 0:
-            raise ValueError("Il fattore di idealità deve essere un valore positivo.")
-        if temperature_k <= 0:
-            raise ValueError("La temperatura in Kelvin deve essere positiva.")
-
-        self.Is = float(saturation_current)
-        self.n = float(ideality_factor)
-        self.Vt = (K * temperature_k) / Q # Tensione termica (kT/q)
-
-        print(f"Diodo creato con Is = {self.Is}A, n = {self.n}, Vt = {self.Vt:.4f}V.")
+        # Parametri specifici del LED
+        self.breakdown_voltage = float(breakdown_voltage) # Tensione di breakdown inverso
+        self.luminous_efficiency = float(luminous_efficiency) # Efficienza luminosa (un fattore arbitrario)
 
     def calculate_current(self, voltage_difference):
         """
-        Calcola la corrente che scorre attraverso il diodo data la differenza di potenziale.
-        (Equazione di Shockley: Id = Is * (exp(Vd / (n*Vt)) - 1))
-
-        Args:
-            voltage_difference (float or np.ndarray): Tensione (Vd) ai capi del diodo.
-
-        Returns:
-            float or np.ndarray: Corrente (Id) che scorre attraverso il diodo.
+        Calcola la corrente che scorre attraverso il LED.
+        Include un modello semplificato per la caduta diretta e il breakdown inverso.
         """
-        # Protezione per valori molto grandi di Vd per evitare overflow con np.exp
-        # Questo è importante in contesti di solutori numerici.
-        # Un valore ragionevole per Vd/(n*Vt) che causa overflow è tipicamente > 700
-        exponent_arg = voltage_difference / (self.n * self.Vt)
-        if isinstance(exponent_arg, np.ndarray):
-            exponent_arg = np.clip(exponent_arg, None, 700) # Limita l'esponente per array
+        if voltage_difference > 0:
+            # Modello del diodo con resistenza in serie per la regione di conduzione
+            # Risolvi per Vd: Vd = V - I*Rs
+            # Id = Is * (exp(Vd / (n*Vt)) - 1)
+            # Questo è un'equazione implicita. Possiamo usare Newton-Raphson internamente
+            # o una semplificazione. Per semplicità e compatibilità con MNA, usiamo una forma
+            # che assomiglia a un diodo in serie con una resistenza.
+            # Per l'MNA, il contributo sarà già incluso nella matrice Jacobiana
+            # per la linearizzazione del diodo.
+            # La resistenza in serie può essere modellata come un componente separato.
+            # Qui si simula solo la corrente di un diodo senza Rs esplicita:
+            exponent_arg = voltage_difference / (self.n * self.Vt)
+            if isinstance(exponent_arg, np.ndarray):
+                exponent_arg = np.clip(exponent_arg, None, 700)
+            else:
+                exponent_arg = min(exponent_arg, 700)
+            return self.Is * (np.exp(exponent_arg) - 1.0)
+        elif voltage_difference < self.breakdown_voltage:
+            # Regione di breakdown inverso (corrente negativa crescente)
+            # Modello semplificato: aumento rapido della corrente oltre la tensione di breakdown
+            # Non è un modello Zener completo, ma una risposta inversa.
+            return (voltage_difference - self.breakdown_voltage) / 10.0 # Rinv = 10 Ohm
         else:
-            exponent_arg = min(exponent_arg, 700) # Limita l'esponente per singolo valore
+            return 0.0 # Quasi zero in polarizzazione inversa e vicino a zero in forward prima di Vf
 
-        return self.Is * (np.exp(exponent_arg) - 1)
+    def calculate_conductance(self, voltage_difference):
+        """
+        Calcola la conduttanza dinamica del LED.
+        La derivata di I = Is * (exp(Vd/(n*Vt)) - 1) è g = Is / (n*Vt) * exp(Vd/(n*Vt))
+        Aggiungiamo la derivata per la regione di breakdown.
+        """
+        if voltage_difference > 0:
+            exponent_arg = voltage_difference / (self.n * self.Vt)
+            if isinstance(exponent_arg, np.ndarray):
+                exponent_arg = np.clip(exponent_arg, None, 700)
+            else:
+                exponent_arg = min(exponent_arg, 700)
+            return (self.Is / (self.n * self.Vt)) * np.exp(exponent_arg)
+        elif voltage_difference < self.breakdown_voltage:
+            return 1.0 / 10.0 # Derivata di (V - V_bd) / 10 è 1/10
+        else:
+            return 1e-9 # Conduttanza molto bassa (quasi zero) quando è spento
+
+    def get_luminous_output(self, current):
+        """
+        Calcola l'output luminoso relativo basato sulla corrente in forward.
+        """
+        # La luminosità è approssimativamente proporzionale alla corrente.
+        # Solo per correnti positive.
+        if isinstance(current, np.ndarray):
+            luminous = np.maximum(0, current) * self.luminous_efficiency
+        else:
+            luminous = max(0, current) * self.luminous_efficiency
+        return luminous
 
     def __str__(self):
-        return f"Diode(Is={self.Is:.2e}A, n={self.n}, Vt={self.Vt:.4f}V)"
-
-# Esempio di utilizzo
-if __name__ == "__main__":
-    d1 = Diode() # Diodo standard con parametri default
-    print(d1)
-
-    voltages = np.linspace(-1, 1, 100) # Da -1V a 1V
-    currents = [d1.calculate_current(v) for v in voltages]
-
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(8, 5))
-    plt.plot(voltages, currents)
-    plt.title('Caratteristica I-V del Diodo')
-    plt.xlabel('Tensione (V)')
-    plt.ylabel('Corrente (A)')
-    plt.grid(True)
-    plt.axvline(0, color='grey', linestyle='--', linewidth=0.8)
-    plt.axhline(0, color='grey', linestyle='--', linewidth=0.8)
-    plt.show()
-
-    # Esempio di clipping
-    signal = 0.5 * np.sin(np.linspace(0, 2*np.pi, 1000)) * 5 # Onda sinusoidale da -5V a 5V
-    clipped_signal = [d1.calculate_current(s) for s in signal]
-    
-    plt.figure(figsize=(8, 5))
-    plt.plot(signal, label='Input Signal (V)')
-    plt.plot(clipped_signal, label='Output Current (A) - Clipped')
-    plt.title('Esempio di Clipping del Diodo')
-    plt.xlabel('Sample')
-    plt.ylabel('Value')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+        return f"LED(Is={self.Is:.1e}, n={self.n:.1f}, Vf_breakdown={self.breakdown_voltage:.1f}V)"
