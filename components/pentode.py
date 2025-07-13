@@ -1,109 +1,116 @@
+# components/pentode.py
+
 import numpy as np
+from utils.helpers import numerical_jacobian # Importa per le derivate numeriche
 
 class Pentode:
-    """
-    Modello fisico per un Pentodo/Tetrodo (valvola termoionica a 5 o 4 elettrodi)
-    basato su un'estensione del modello di Koren o un modello empirico comune.
-    Per semplicità, iniziamo con un modello che usa Va, Vg1 e Vg2.
-    """
-    def __init__(self, mu=10.0, Kp=300.0, X=1.5, Kg1=5.0, Kg2=10.0, KvB=300.0):
+    def __init__(self, mu=10.0, Kp=300.0, X=1.5, Kg1=5.0, Kg2=10.0):
         """
-        Inizializza il Pentodo/Tetrodo con parametri estesi.
-
+        Modello semplificato di Pentodo a vuoto (es. basato su modelli empirici).
         Args:
-            mu (float): Fattore di amplificazione (mu).
-            Kp (float): Parametro di transconduttanza (mA/V^X).
-            X (float): Esponente non lineare.
+            mu (float): Fattore di amplificazione (mu della triode-section implicita).
+            Kp (float): Parametro di perveanza.
+            X (float): Esponente nel modello di corrente (solitamente 1.5).
             Kg1 (float): Parametro di controllo della griglia di controllo (g1).
             Kg2 (float): Parametro di controllo della griglia schermo (g2).
-            KvB (float): Parametro per il breakdown (solitamente per correnti di griglia).
         """
-        if mu <= 0 or Kp <= 0 or X <= 0 or Kg1 <= 0 or Kg2 <= 0:
-            raise ValueError("I parametri mu, Kp, X, Kg1, Kg2 devono essere positivi.")
-
         self.mu = float(mu)
-        self.Kp = float(Kp)
+        self.Kp = float(Kp) # Perveance parameter (mA/V^X)
         self.X = float(X)
-        self.Kg1 = float(Kg1)
-        self.Kg2 = float(Kg2) # Parametro specifico per la griglia schermo
-        self.KvB = float(KvB)
+        self.Kg1 = float(Kg1) # Grid 1 control factor
+        self.Kg2 = float(Kg2) # Grid 2 control factor
 
-        print(f"Pentodo creato con mu={self.mu}, Kp={self.Kp}, X={self.X}, Kg1={self.Kg1}, Kg2={self.Kg2}.")
+        self.Kp_A = self.Kp / 1000.0 # Converti Kp da mA/V^X a A/V^X
 
-    def calculate_anode_current(self, Vg1, Vg2, Va):
+    def calculate_anode_current(self, v_grid1, v_grid2, v_anode):
         """
-        Calcola la corrente di Anodo (Ia) del Pentodo/Tetrodo.
-        Estensione del modello di Koren che considera l'effetto di Vg2.
-        Un approccio comune è usare una "tensione equivalente" che combina Vg1, Vg2 e Va.
-        Questo modello è una semplificazione, i pentodi reali hanno un comportamento più complesso
-        e richiederebbero modelli più robusti (es. di tipo "SPICE-like" o tabelle).
+        Calcola la corrente di Anodo (Ia) del Pentodo.
+        Modello semplificato che considera l'influenza di g1, g2 e anodo.
+        Args:
+            v_grid1 (float): Tensione Griglia-1-Catodo (Vg1).
+            v_grid2 (float): Tensione Griglia-2-Catodo (Vg2).
+            v_anode (float): Tensione Anodo-Catodo (Va).
+        Returns:
+            float: Corrente di Anodo (Ia) in Ampere.
         """
-        Ia = np.zeros_like(Vg1, dtype=float) if isinstance(Vg1, np.ndarray) else 0.0
+        # Modello di Koren/D.T. Smith (semplificato per Ia)
+        # Questo è un modello comune per i pentodi, ma richiede un'implementazione attenta.
+        # Ia = Kp * (V_eff)^X * (1 + lambda * Va)
+        # Dove V_eff = (Vg1 + Vg2/K + Va/mu)
+        # O V_eff = (Vg1/Kg1 + Vg2/Kg2) se si usano coefficienti per le griglie
+        
+        # Una forma comune che include schermo e controllo:
+        # V_eff = (v_grid1 + v_grid2 / self.Kg2) # Semplificazione per V_eff
+        # Ia = self.Kp_A * (V_eff)**self.X # Questo ignora l'anodo.
+        
+        # Modello che include l'effetto di Va (plate resistance) e screengrid (g2)
+        # V_grid_equivalent = v_grid1 + v_grid2 / self.mu_screen # mu_screen è un rapporto Vg2/Vg1 per Ia
+        # Usiamo un modello più tipico:
+        
+        # Effetto di cut-off
+        if v_grid1 <= 0: # Vg1 sotto cutoff, corrente zero
+             return 0.0
 
-        # Tensione equivalente per il controllo del flusso di elettroni (V_effective)
-        # Questo è il cuore del modello del pentodo per come Vg1, Vg2 e Va influenzano Ia.
-        # Formula di Koren per i pentodi usa spesso un V_equivalent combinato:
-        # V_eq = (Va / mu_eff) + (Vg1 / Kg1) + (Vg2 / Kg2_eff)
-        # dove mu_eff e Kg2_eff possono dipendere leggermente dalle tensioni.
-        # Per un modello di base, possiamo semplificare:
-        Ve = (Vg1 / self.Kg1) + (Vg2 / self.Kg2) # Griglie di controllo del flusso
+        # Tensione efficace di griglia (combinazione di Vg1 e Vg2)
+        # Questo è un punto chiave e può variare a seconda del modello.
+        # Un approccio è trattare Vg2 come una sorgente di tensione ausiliaria costante.
+        # E_g = (Vg1 + Vg2 / mu_G2) dove mu_G2 è fattore di amplificazione da G2 a Catodo
+        # Per semplicità usiamo un modello in cui Vg2 influenza Kp
+        
+        # Variazione di Kp con Vg2 (molto semplificato)
+        # Kp_adjusted = self.Kp_A * (1 + v_grid2 / self.Kg2) # Aumenta Kp con Vg2
 
-        # Cutoff condition (quando Ve è sotto la soglia di conduzione)
-        # La corrente è zero se la tensione effettiva è insufficiente.
-        active_condition = Ve > 1e-6 # Assicuriamo che Ve sia positivo e non zero
+        # Approccio basato su curve caratteristiche:
+        # Corrente in saturazione di pentodo è relativamente indipendente da Va,
+        # ma dipende da Vg1 e Vg2.
+        # Ia = f(Vg1, Vg2)
+        # Poi effetto di modulazione di canale: (1 + lambda * Va)
+        
+        # Proviamo con un modello basato su Vg1 e Vg2 (approccio di D.T. Smith)
+        # Assume Va alta
+        
+        # Se (Vg1 + Vg2/Kg2) è la V_eff che guida Ia
+        V_eff = v_grid1 + v_grid2 / self.Kg2
 
-        if np.any(active_condition):
-            Ve_active = Ve[active_condition]
-            # La corrente di anodo è calcolata come nel triodo, ma con Ve dipendente da Vg1 e Vg2
-            Ia[active_condition] = self.Kp * (Ve_active ** self.X)
+        if V_eff <= 0:
+            return 0.0
 
-            # Aggiusta per saturazione del pentodo (Vds) o altre non linearità
-            # I pentodi hanno una saturazione abbastanza piatta in regione attiva.
-            # Questo modello semplice non cattura la "ginocchiatura" in regione di triodo.
-            # Per una simulazione più fedele, ci vorrebbe un modello a più segmenti o un lookup table.
-            # Qui si assume una saturazione ideale con Vg1 e Vg2 che dominano il controllo.
+        # Termine di modulazione di canale (plate resistance)
+        # Lambda per i pentodi è molto più piccolo che per i triodi
+        # Per pentodi in regione di saturazione, la corrente è quasi indipendente da Va.
+        # Aggiungiamo un piccolo coefficiente lambda per l'anodo.
+        lambda_anode = 0.01 # Un valore molto piccolo
 
-        # Assicurati che la corrente non sia mai negativa
-        return np.maximum(0, Ia)
+        ia_current = self.Kp_A * (V_eff**self.X) * (1.0 + lambda_anode * v_anode)
+        
+        # Gestione della regione di triodo (se Va è molto bassa)
+        # Quando Va scende sotto un certo livello (es. Vg2), il pentodo può entrare in triodo-region
+        # Questa è una semplificazione del modello, per un pentodo "ideale" è sempre in saturazione
+        # rispetto all'anodo se Va è sufficientemente alta.
+        # Inizialmente non modelliamo la regione di triodo del pentodo.
+
+        return max(0.0, ia_current)
+
+    # --- Metodi per la Jacobiana ---
+    # Utilizzano numerical_jacobian per semplicità.
+
+    def calculate_transconductance_g1(self, v_grid1, v_grid2, v_anode):
+        """
+        Calcola la transconduttanza rispetto a Grid 1 (gm1 = d(Ia)/d(Vg1)).
+        """
+        return numerical_jacobian(lambda v: self.calculate_anode_current(v, v_grid2, v_anode), v_grid1)
+
+    def calculate_transconductance_g2(self, v_grid1, v_grid2, v_anode):
+        """
+        Calcola la transconduttanza rispetto a Grid 2 (gm2 = d(Ia)/d(Vg2)).
+        """
+        return numerical_jacobian(lambda v: self.calculate_anode_current(v_grid1, v, v_anode), v_grid2)
+
+    def calculate_plate_conductance(self, v_grid1, v_grid2, v_anode):
+        """
+        Calcola la conduttanza di placca (gp = d(Ia)/d(Va)) del Pentodo.
+        """
+        return numerical_jacobian(lambda v: self.calculate_anode_current(v_grid1, v_grid2, v), v_anode)
 
     def __str__(self):
-        return (f"Pentode(mu={self.mu}, Kp={self.Kp}, X={self.X}, "
-                f"Kg1={self.Kg1}, Kg2={self.Kg2})")
-
-# Esempio di utilizzo e plot delle curve I-V
-if __name__ == "__main__":
-    # Parametri tipici per un EL34 o 6L6 (valvole di potenza)
-    pentode1 = Pentode(mu=10.0, Kp=300.0, X=1.5, Kg1=5.0, Kg2=10.0)
-    print(pentode1)
-
-    import matplotlib.pyplot as plt
-
-    # Plot delle curve Ia vs Va per diversi Vg1 (con Vg2 fisso)
-    va_values = np.linspace(0, 400, 100) # Va da 0 a 400V
-    vg1_steps = np.array([-5, -10, -15, -20]) # Diversi valori di Vg1 (griglia di controllo)
-    vg2_fixed = 250.0 # Vg2 fissa (tensione della griglia schermo)
-
-    plt.figure(figsize=(10, 6))
-    for vg1 in vg1_steps:
-        ia_values = pentode1.calculate_anode_current(vg1, vg2_fixed, va_values)
-        plt.plot(va_values, ia_values * 1e3, label=f'Vg1={vg1:.1f}V') # Corrente in mA
-
-    plt.title(f'Caratteristiche di Uscita del Pentodo (Ia vs Va) con Vg2={vg2_fixed}V')
-    plt.xlabel('Va (V)')
-    plt.ylabel('Ia (mA)')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # Plot delle curve di trasferimento (Ia vs Vg1 per Va e Vg2 fissi)
-    vg1_values_transfer = np.linspace(-30, 0, 100)
-    va_fixed = 300.0 # Va fissa
-    ia_transfer = pentode1.calculate_anode_current(vg1_values_transfer, vg2_fixed, va_fixed)
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(vg1_values_transfer, ia_transfer * 1e3)
-    plt.title(f'Caratteristiche di Trasferimento del Pentodo (Ia vs Vg1) con Va={va_fixed}V, Vg2={vg2_fixed}V')
-    plt.xlabel('Vg1 (V)')
-    plt.ylabel('Ia (mA)')
-    plt.grid(True)
-    plt.show()
+        return f"Pentode(mu={self.mu:.1f}, Kp={self.Kp:.1f} mA/V^{self.X:.1f})"
