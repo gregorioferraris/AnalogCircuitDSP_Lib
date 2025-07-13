@@ -1,120 +1,116 @@
+# components/bjt.py
+
 import numpy as np
 from utils.constants import Q, K, T_ROOM, VT_ROOM # Importa costanti fisiche
+from utils.helpers import numerical_jacobian # Importa per le derivate numeriche
 
 class BJT:
-    """
-    Modello fisico semplificato per un BJT NPN (modello Ebers-Moll semplificato).
-    Questo modello si concentra sulla relazione Ic-Vbe.
-    """
-    def __init__(self, Is=1e-14, Bf=100.0, Br=0.1, Vaf=np.inf, Var=np.inf, temperature_k=T_ROOM):
+    def __init__(self, Is=1e-14, Bf=200, Br=1.0, Vaf=80.0, Var=20.0, Ise=1e-14, Isc=1e-14, Ne=1.5, Nc=2.0):
         """
-        Inizializza il BJT.
-
+        Modello semplificato di Transistor Bipolare a Giunzione (BJT) NPN.
+        Basato su un sottoinsieme dei parametri del modello Gummel-Poon (Ebers-Moll semplificato).
         Args:
-            Is (float): Corrente di saturazione del diodo di giunzione (A). Default 1e-14A.
-            Bf (float): Guadagno di corrente in avanti (beta_forward). Default 100.
-            Br (float): Guadagno di corrente inverso (beta_reverse). Default 0.1.
-            Vaf (float): Tensione di Early in avanti (V). Default np.inf (nessun effetto Early).
-            Var (float): Tensione di Early inversa (V). Default np.inf.
-            temperature_k (float): Temperatura in Kelvin. Default temperatura ambiente.
+            Is (float): Corrente di saturazione inversa di giunzione (Ampere).
+            Bf (float): Guadagno di corrente in forward (beta_F).
+            Br (float): Guadagno di corrente in reverse (beta_R).
+            Vaf (float): Tensione di Early in forward (Volt).
+            Var (float): Tensione di Early in reverse (Volt).
+            Ise (float): Corrente di saturazione per emettitore non ideale.
+            Isc (float): Corrente di saturazione per collettore non ideale.
+            Ne (float): Coefficiente di emissione per emettitore.
+            Nc (float): Coefficiente di emissione per collettore.
         """
-        if Is <= 0 or Bf <= 0 or Br <= 0 or temperature_k <= 0:
-            raise ValueError("I parametri Is, Bf, Br, Temperature devono essere positivi.")
-
         self.Is = float(Is)
-        self.Bf = float(Bf) # Beta Forward (hFE)
-        self.Br = float(Br) # Beta Reverse
+        self.Bf = float(Bf) # Forward Beta (hFE)
+        self.Br = float(Br) # Reverse Beta
         self.Vaf = float(Vaf) # Forward Early Voltage
         self.Var = float(Var) # Reverse Early Voltage
-        self.Vt = (K * temperature_k) / Q # Tensione termica
+        self.Ise = float(Ise) # Non-ideal base-emitter saturation current
+        self.Ne = float(Ne) # Non-ideal base-emitter emission coefficient
+        self.Isc = float(Isc) # Non-ideal base-collector saturation current
+        self.Nc = float(Nc) # Non-ideal base-collector emission coefficient
 
-        # Correnti di saturazione inversa di diodi equivalenti per Ebers-Moll
-        self.Ise = self.Is # Emitter-base saturation current
-        self.Isc = self.Is # Collector-base saturation current
+        self.Vt = VT_ROOM # Tensione termica
 
-        print(f"BJT (NPN) creato con Is={self.Is}A, Bf={self.Bf}, Vt={self.Vt:.4f}V.")
-
-    def calculate_collector_current(self, Vbe, Vce):
+    def calculate_collector_current(self, v_be, v_ce):
         """
-        Calcola la corrente di Collettore (Ic) per un BJT NPN.
-        (Modello semplificato, ignora la corrente di base e si concentra su Ic-Vbe)
-
+        Calcola la corrente di Collettore (Ic) del BJT NPN.
+        Modello Ebers-Moll semplificato con effetto Early.
         Args:
-            Vbe (float or np.ndarray): Tensione Base-Emettitore (V).
-            Vce (float or np.ndarray): Tensione Collettore-Emettitore (V).
-
+            v_be (float): Tensione Base-Emettitore (Vbe).
+            v_ce (float): Tensione Collettore-Emettitore (Vce).
         Returns:
-            float or np.ndarray: Corrente di Collettore (Ic) (A).
+            float: Corrente di Collettore (Ic) in Ampere.
         """
-        # Equazione di Shockley per la giunzione BE
-        # Assume che il BJT sia in regione attiva o saturazione.
-        # La corrente di collettore è dominata dalla diffusione in avanti.
-        if isinstance(Vbe, np.ndarray):
-            Vbe_eff = np.clip(Vbe, None, 700 * self.Vt) # Protezione overflow exp
-        else:
-            Vbe_eff = min(Vbe, 700 * self.Vt)
+        # Corrente di Emettitore ideale (forward)
+        exp_vbe = np.exp(v_be / self.Vt)
+        I_f = self.Is * (exp_vbe - 1.0) # Corrente ideale di diodo per Vbe
 
-        # Corrente di diffusione in avanti (relativa alla giunzione B-E)
-        If = self.Is * (np.exp(Vbe_eff / self.Vt) - 1)
+        # Corrente di Collettore ideale (reverse) - non sempre usata in modelli semplici
+        # exp_vbc = np.exp((v_be - v_ce) / self.Vt)
+        # I_r = self.Is * (exp_vbc - 1.0)
 
-        # Effetto Early (modulazione della larghezza della base)
-        # Aumenta la corrente di collettore all'aumentare di Vce
-        early_factor = 1.0 + (Vce / self.Vaf) if self.Vaf != np.inf else 1.0
+        # Effetto Early (modulazione di base)
+        # 1 + Vce / Vaf (forward active)
+        # 1 + Vbc / Var (reverse active)
+        # Per forward active:
+        early_factor_f = (1.0 + v_ce / self.Vaf) if self.Vaf > 0 else 1.0
+        early_factor_r = (1.0 + (v_ce - v_be) / self.Var) if self.Var > 0 else 1.0 # Vbc = Vbe - Vce
 
-        # Corrente di collettore
-        Ic = If * early_factor
+        # Corrente di Collettore (attiva diretta)
+        Ic = (self.Bf / (self.Bf + 1.0)) * I_f * early_factor_f
 
-        # Gestione delle regioni di Cutoff e Saturazione
-        # In cutoff (Vbe basso), Ic è quasi 0. If già lo gestisce.
-        # In saturazione, il modello semplificato non è preciso senza la corrente di base e di collettore-base inversa.
-        # Per una simulazione più robusta, si userebbe un solutore di circuito completo
-        # e un modello Ebers-Moll più completo con giunzioni CB e BE.
-        # Per ora, limitiamo la corrente al minimo per evitare negative assurde.
-        return np.maximum(0, Ic)
+        # Aggiungi corrente di saturazione/cut-off
+        if v_be < 0.5: # Sotto la tensione di accensione tipica
+            Ic = 0.0 # Cut-off
+        elif v_ce < 0.2 and Ic > 0: # Regione di saturazione (Vce basso)
+            # In saturazione, Ic non segue il modello standard beta_f * Ib
+            # Si avvicina a Vce_sat/R_sat. Qui si può fare una limitazione.
+            # Questo è molto semplificato. Un modello SPICE avrebbe più equazioni.
+            Ic = min(Ic, (v_ce / 10.0)) # Corrente limitata da una resistenza bassa (10 Ohm)
+            pass
 
-    def calculate_base_current(self, Vbe, Vce):
+        return max(0.0, Ic) # La corrente non può essere negativa
+
+    def calculate_base_current(self, v_be, v_ce):
         """
-        Calcola la corrente di Base (Ib) per un BJT NPN.
-        (Semplificato: Ib = Ic / Bf)
+        Calcola la corrente di Base (Ib) del BJT NPN.
         """
-        Ic = self.calculate_collector_current(Vbe, Vce)
-        return Ic / self.Bf
+        # Corrente di Emettitore ideale (forward)
+        exp_vbe = np.exp(v_be / self.Vt)
+        I_f = self.Is * (exp_vbe - 1.0)
+
+        # Corrente di Base ideale (da corrente di Collettore)
+        # Ib = Ic / Bf
+        Ib = self.calculate_collector_current(v_be, v_ce) / self.Bf
+
+        # Aggiungi corrente di ricombinazione (non ideale)
+        # Ibe_recomb = Ise * (exp(Vbe / (Ne*Vt)) - 1)
+        # Ib += Ibe_recomb / self.Bf # Semplificazione
+
+        return max(0.0, Ib)
+
+    # --- Metodi per la Jacobiana ---
+    # Questi calcolano le derivate parziali necessarie per la matrice Jacobiana.
+    # Per semplicità, qui usiamo la derivata numerica. Per precisione, implementare analiticamente.
+
+    def calculate_transconductance(self, v_be, v_ce):
+        """
+        Calcola la transconduttanza (gm = d(Ic)/d(Vbe)) del BJT.
+        """
+        return numerical_jacobian(lambda v: self.calculate_collector_current(v, v_ce), v_be)
+
+    def calculate_input_conductance(self, v_be, v_ce):
+        """
+        Calcola la conduttanza di ingresso (gpi = d(Ib)/d(Vbe)) del BJT.
+        """
+        return numerical_jacobian(lambda v: self.calculate_base_current(v, v_ce), v_be)
+
+    def calculate_output_conductance(self, v_be, v_ce):
+        """
+        Calcola la conduttanza di uscita (gce = d(Ic)/d(Vce)) del BJT.
+        """
+        return numerical_jacobian(lambda v: self.calculate_collector_current(v_be, v), v_ce)
 
     def __str__(self):
-        return f"BJT(Is={self.Is:.2e}A, Bf={self.Bf}, Vaf={self.Vaf}V)"
-
-# Esempio di utilizzo e plot delle curve I-V
-if __name__ == "__main__":
-    bjt1 = BJT(Is=1e-14, Bf=200, Vaf=80.0) # BJT NPN tipico (es. 2N3904)
-    print(bjt1)
-
-    import matplotlib.pyplot as plt
-
-    # Plot delle curve Ic vs Vce per diversi Vbe (o Ib)
-    vce_values = np.linspace(0, 10, 100) # Vce da 0 a 10V
-    vbe_steps = np.linspace(0.6, 0.75, 5) # Vbe da 0.6V a 0.75V (regione attiva)
-
-    plt.figure(figsize=(10, 6))
-    for vbe in vbe_steps:
-        ic_values = bjt1.calculate_collector_current(vbe, vce_values)
-        plt.plot(vce_values, ic_values * 1e3, label=f'Vbe={vbe:.2f}V') # Corrente in mA
-
-    plt.title('Caratteristiche di Uscita del BJT (Ic vs Vce)')
-    plt.xlabel('Vce (V)')
-    plt.ylabel('Ic (mA)')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # Plot delle curve di trasferimento (Ic vs Vbe per Vce fissa)
-    vbe_values_transfer = np.linspace(0.5, 0.8, 100)
-    vce_fixed = 5.0 # Vce fissa
-    ic_transfer = bjt1.calculate_collector_current(vbe_values_transfer, vce_fixed)
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(vbe_values_transfer, ic_transfer * 1e3)
-    plt.title('Caratteristiche di Trasferimento del BJT (Ic vs Vbe)')
-    plt.xlabel('Vbe (V)')
-    plt.ylabel('Ic (mA)')
-    plt.grid(True)
-    plt.show()
+        return f"BJT(Is={self.Is:.1e}, Bf={self.Bf:.0f}, Vaf={self.Vaf:.1f}V)"
