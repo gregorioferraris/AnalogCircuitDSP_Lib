@@ -1,101 +1,79 @@
+# components/zener_diode.py
+
 import numpy as np
-from utils.constants import Q, K, T_ROOM, VT_ROOM # Importa costanti fisiche
+from utils.constants import Q, K, T_ROOM, VT_ROOM
 
 class ZenerDiode:
-    """
-    Modello fisico per un diodo Zener.
-    Combina l'equazione di Shockley per la polarizzazione diretta
-    e un modello per la regione di breakdown Zener in polarizzazione inversa.
-    """
-    def __init__(self, Is=1e-12, n=1.0, Vz=5.6, Iz_test=1e-3, Rz=5.0, temperature_k=T_ROOM):
+    def __init__(self, Vz=5.6, Iz_test=1e-3, Rz=10.0, saturation_current=1e-14, emission_coefficient=1.0):
         """
-        Inizializza il diodo Zener.
-
+        Simula un diodo Zener.
         Args:
-            Is (float): Corrente di saturazione inversa (A) per la polarizzazione diretta.
-            n (float): Fattore di idealità per la polarizzazione diretta.
-            Vz (float): Tensione Zener nominale (V).
-            Iz_test (float): Corrente di test (A) alla quale è specificato Vz.
+            Vz (float): Tensione Zener nominale (Volt).
+            Iz_test (float): Corrente di test a cui Vz è specificata (Ampere).
             Rz (float): Resistenza dinamica nella regione Zener (Ohm).
-            temperature_k (float): Temperatura in Kelvin.
+            saturation_current (float): Corrente di saturazione inversa (per la regione forward).
+            emission_coefficient (float): Coefficiente di emissione (per la regione forward).
         """
-        if Is <= 0 or n <= 0 or Vz <= 0 or Iz_test <= 0 or Rz < 0 or temperature_k <= 0:
-            raise ValueError("I parametri Is, n, Vz, Iz_test, Rz, Temperature devono essere positivi o non negativi.")
+        self.Vz = float(Vz) # Zener voltage (magnitudine)
+        self.Iz_test = float(Iz_test) # Test current for Zener voltage
+        self.Rz = float(Rz) # Zener dynamic resistance
+        self.Is = float(saturation_current) # Forward saturation current
+        self.n = float(emission_coefficient) # Forward emission coefficient
+        self.Vt = VT_ROOM # Thermal voltage
 
-        self.Is = float(Is)
-        self.n = float(n)
-        self.Vz = float(Vz)
-        self.Iz_test = float(Iz_test)
-        self.Rz = float(Rz)
-        self.Vt = (K * temperature_k) / Q # Tensione termica
-
-        # Calcola la tensione di knee (Vzk) per la transizione alla regione Zener
-        # Usiamo un punto per definire l'inizio della curva Zener
-        # Questo è un modello semplificato; modelli più precisi usano un esponenziale per la regione Zener.
-        # Qui usiamo un'approssimazione lineare per la parte Zener per semplicità.
-        self.Vzk = self.Vz - (self.Iz_test * self.Rz) # Tensione all'inizio della pendenza Zener
-
-        print(f"Zener Diode creato con Vz={self.Vz}V, Rz={self.Rz} Ohm.")
+        # Calcola un parametro Vbd per la regione di breakdown Zener
+        # Vz = Vbd + Iz_test * Rz
+        # Vbd = Vz - Iz_test * Rz (approssimazione)
+        # Usiamo un modello basato sul diodo per la regione Zener inversa.
+        # Un modo comune è modellare la regione inversa come:
+        # I_R = -Iz * exp(-(V_z + Vd) / (n_z * Vt))
+        # dove V_z è la tensione zener e Vd è la tensione applicata (negativa).
+        # Per semplicità, useremo un modello di diodo inverso con una resistenza.
 
     def calculate_current(self, voltage_difference):
         """
-        Calcola la corrente che scorre attraverso il diodo Zener data la differenza di potenziale.
-
-        Args:
-            voltage_difference (float or np.ndarray): Tensione (Vd) ai capi del diodo.
-
-        Returns:
-            float or np.ndarray: Corrente (Id) che scorre attraverso il diodo.
+        Calcola la corrente che scorre attraverso il diodo Zener.
+        Considera la regione di forward e la regione di breakdown Zener.
         """
-        Id = np.zeros_like(voltage_difference, dtype=float) if isinstance(voltage_difference, np.ndarray) else 0.0
-
-        # Regione di polarizzazione diretta (forward bias)
-        forward_condition = voltage_difference > 0
-        if np.any(forward_condition):
-            Vd_forward = voltage_difference[forward_condition]
-            exponent_arg = Vd_forward / (self.n * self.Vt)
-            exponent_arg = np.clip(exponent_arg, None, 700)
-            Id[forward_condition] = self.Is * (np.exp(exponent_arg) - 1)
-
-        # Regione di polarizzazione inversa (reverse bias)
-        reverse_condition = voltage_difference <= 0
-        if np.any(reverse_condition):
-            Vd_reverse = voltage_difference[reverse_condition]
-
-            # Corrente inversa di saturazione (vicina a -Is)
-            # Fino al punto in cui si raggiunge la tensione Zener
-            zener_breakdown_condition = Vd_reverse <= -self.Vzk
-            if np.any(zener_breakdown_condition):
-                # Modello lineare nella regione Zener
-                Id[reverse_condition & zener_breakdown_condition] = (Vd_reverse[reverse_condition & zener_breakdown_condition] + self.Vz) / self.Rz + self.Iz_test
+        if voltage_difference >= 0:
+            # Regione di polarizzazione diretta (come un diodo normale)
+            exponent_arg = voltage_difference / (self.n * self.Vt)
+            if isinstance(exponent_arg, np.ndarray):
+                exponent_arg = np.clip(exponent_arg, None, 700)
             else:
-                # Corrente di fuga inversa (quasi -Is)
-                Id[reverse_condition & ~zener_breakdown_condition] = -self.Is
+                exponent_arg = min(exponent_arg, 700)
+            return self.Is * (np.exp(exponent_arg) - 1.0)
+        else:
+            # Regione di polarizzazione inversa (Zener)
+            # La tensione Zener è Vz, ma la tensione applicata è negativa (-V_app).
+            # Se |V_app| > Vz, la corrente inversa aumenta rapidamente.
+            # Modello semplificato: una volta superato Vz, la corrente è guidata dalla resistenza Rz.
+            if voltage_difference < -self.Vz: # Entrato nella regione Zener
+                # Corrente = (Tensione applicata - Tensione Zener) / Resistenza Zener
+                # La tensione applicata è negativa, quindi V_diff - (-Vz)
+                return (voltage_difference + self.Vz) / self.Rz # Corrente negativa
+            else:
+                # Corrente di fuga molto piccola in polarizzazione inversa prima del breakdown
+                return -self.Is # -Is è la corrente di fuga inversa
 
-        return Id
+    def calculate_conductance(self, voltage_difference):
+        """
+        Calcola la conduttanza dinamica (differenziale) del diodo Zener.
+        """
+        if voltage_difference >= 0:
+            # Conduttanza in polarizzazione diretta (come diodo normale)
+            exponent_arg = voltage_difference / (self.n * self.Vt)
+            if isinstance(exponent_arg, np.ndarray):
+                exponent_arg = np.clip(exponent_arg, None, 700)
+            else:
+                exponent_arg = min(exponent_arg, 700)
+            return (self.Is / (self.n * self.Vt)) * np.exp(exponent_arg)
+        else:
+            # Conduttanza in polarizzazione inversa (Zener)
+            if voltage_difference < -self.Vz:
+                return 1.0 / self.Rz # Conduttanza dinamica nella regione Zener
+            else:
+                return 1e-9 # Conduttanza molto bassa (quasi zero) in regione di fuga inversa
 
     def __str__(self):
-        return f"ZenerDiode(Vz={self.Vz}V, Iz_test={self.Iz_test}A, Rz={self.Rz}Ohm)"
-
-# Esempio di utilizzo e plot delle curve I-V
-if __name__ == "__main__":
-    zener1 = ZenerDiode(Vz=5.6, Iz_test=1e-3, Rz=10.0) # Zener 5.6V
-    print(zener1)
-
-    import matplotlib.pyplot as plt
-
-    voltages = np.linspace(-10, 1, 200) # Da -10V a 1V per mostrare Zener e forward
-    currents = np.array([zener1.calculate_current(v) for v in voltages])
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(voltages, currents * 1e3) # Corrente in mA
-    plt.title(f'Caratteristica I-V del Diodo Zener ({zener1.Vz}V)')
-    plt.xlabel('Tensione (V)')
-    plt.ylabel('Corrente (mA)')
-    plt.grid(True)
-    plt.axvline(0, color='grey', linestyle='--', linewidth=0.8)
-    plt.axhline(0, color='grey', linestyle='--', linewidth=0.8)
-    plt.annotate(f'Vz = {-zener1.Vz}V', xy=(-zener1.Vz, 0), xytext=(-zener1.Vz - 2, 5),
-                 arrowprops=dict(facecolor='black', shrink=0.05),
-                 horizontalalignment='right')
-    plt.show()
+        return f"ZenerDiode(Vz={self.Vz:.1f}V, Rz={self.Rz:.1f} Ohm)"
