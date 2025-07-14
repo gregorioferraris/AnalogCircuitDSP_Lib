@@ -1,130 +1,93 @@
 # components/pentode.py
-
 import numpy as np
-from utils.helpers import numerical_jacobian # Importa per le derivate numeriche
+from components.component import Component
 
-class Pentode:
-    def __init__(self, name="Pentode", mu=10.0, Kp=300.0, X=1.5, Kg1=5.0, Kg2=10.0):
+class Pentode(Component):
+    def __init__(self, name: str, plate_node: str, grid_node: str, screen_grid_node: str, suppressor_grid_node: str, cathode_node: str,
+                 mu: float = 100.0, Kp: float = 1.0, Ex: float = 1.0, Kg1: float = 1.0, Kg2: float = 1.0, Vg_offset: float = 0.0):
         """
-        Modello semplificato di Pentodo a vuoto (es. basato su modelli empirici).
+        Inizializza un Pentodo usando un modello tipo Koren esteso (o simile).
         Args:
-            name (str): Nome del componente.
-            mu (float): Fattore di amplificazione (mu della triode-section implicita).
-            Kp (float): Parametro di perveanza.
-            X (float): Esponente nel modello di corrente (solitamente 1.5).
-            Kg1 (float): Parametro di controllo della griglia di controllo (g1).
-            Kg2 (float): Parametro di controllo della griglia schermo (g2).
+            name (str): Nome univoco dell'istanza.
+            plate_node (str): Nodo della placca (anodo).
+            grid_node (str): Nodo della griglia di controllo (g1).
+            screen_grid_node (str): Nodo della griglia schermo (g2).
+            suppressor_grid_node (str): Nodo della griglia soppressore (g3).
+            cathode_node (str): Nodo del catodo.
+            mu (float): Fattore di amplificazione (per g1).
+            Kp (float): Parametro di permeabilità.
+            Ex (float): Esponente.
+            Kg1 (float): Parametro di linearità della griglia di controllo.
+            Kg2 (float): Parametro di linearità della griglia schermo.
+            Vg_offset (float): Offset di tensione per la griglia di controllo.
         """
-        self.name = name # Aggiunto il nome
-        self.mu = float(mu)
-        self.Kp = float(Kp) # Perveance parameter (mA/V^X)
-        self.X = float(X)
-        self.Kg1 = float(Kg1) # Grid 1 control factor
-        self.Kg2 = float(Kg2) # Grid 2 control factor
+        super().__init__(name, plate_node, grid_node, screen_grid_node, suppressor_grid_node, cathode_node)
+        self.pin_names = ('plate', 'grid', 'screen_grid', 'suppressor_grid', 'cathode') # Per mappatura nodi con nome
+        self.mu = mu
+        self.Kp = Kp
+        self.Ex = Ex
+        self.Kg1 = Kg1
+        self.Kg2 = Kg2
+        self.Vg_offset = Vg_offset
 
-        self.Kp_A = self.Kp / 1000.0 # Converti Kp da mA/V^X a A/V^X
-
-        # Mappatura dei nodi (Anodo/Placca, Griglia1, Griglia2, Catodo)
-        self.nodes = {} # Chiavi: 'anode', 'grid1', 'grid2', 'cathode'
-
-    def set_nodes(self, anode_node_id, grid1_node_id, grid2_node_id, cathode_node_id):
-        """Assegna gli ID dei nodi ai pin del Pentodo."""
-        self.nodes['anode'] = anode_node_id
-        self.nodes['grid1'] = grid1_node_id
-        self.nodes['grid2'] = grid2_node_id
-        self.nodes['cathode'] = cathode_node_id
-
-    def calculate_anode_current(self, v_grid1_cathode, v_grid2_cathode, v_anode_cathode):
+    def calculate_plate_current(self, Vgk: float, Vpk: float, Vg2k: float, Vg3k: float) -> float:
         """
-        Calcola la corrente di Anodo (Ia) del Pentodo.
-        Modello semplificato che considera l'influenza di g1, g2 e anodo.
+        Calcola la corrente di placca (Ip) per un pentodo.
+        Questo è un modello molto semplificato; i modelli pentodo reali sono complessi.
         Args:
-            v_grid1_cathode (float): Tensione Griglia-1-Catodo (Vg1k).
-            v_grid2_cathode (float): Tensione Griglia-2-Catodo (Vg2k).
-            v_anode_cathode (float): Tensione Anodo-Catodo (Vak).
+            Vgk (float): Tensione Griglia-Catodo.
+            Vpk (float): Tensione Placca-Catodo.
+            Vg2k (float): Tensione Griglia Schermo-Catodo.
+            Vg3k (float): Tensione Griglia Soppressore-Catodo.
         Returns:
-            float: Corrente di Anodo (Ia) in Ampere.
+            float: Corrente di placca in Ampere.
         """
-        # Modello basato su Vg1 e Vg2. Questo modello assume che il catodo sia il riferimento (GND).
-        # Le tensioni sono relative al catodo.
+        # Per semplicità, questo modello ignora Vg3k e usa un approccio simile al triodo,
+        # ma con l'influenza della griglia schermo.
+        # Un modello pentodo più accurato richiederebbe equazioni più complesse
+        # che modellano la partizione di corrente tra placca e griglia schermo.
 
-        # Tensione efficace di griglia (combinazione di Vg1 e Vg2)
-        # Questo è il punto critico del modello.
-        # Ho adattato la tua V_eff dalla tua implementazione originale:
-        V_eff_g = v_grid1_cathode + v_grid2_cathode / self.Kg2 # Tua V_eff
+        if Vpk <= 0:
+            return 0.0 # Nessuna corrente se la placca non è polarizzata positivamente
 
-        # Se V_eff_g è negativa o zero, la valvola è in cut-off.
-        # (Questo è un cut-off semplificato, i pentodi hanno curve più complesse)
-        if V_eff_g <= 0:
-            return 0.0
+        # Calcolo della tensione di griglia equivalente che controlla la corrente totale
+        # Questo è un punto di semplificazione, i modelli reali sono più complessi
+        effective_grid_voltage = (Vgk + self.Vg_offset) + (Vg2k / self.mu)
 
-        # Termine di modulazione di canale (plate resistance)
-        # Per pentodi in regione di saturazione, la corrente è relativamente indipendente da Va.
-        # Tuttavia, c'è sempre una leggera pendenza (resistenza di placca finita).
-        # Questo è il lambda dalla tua implementazione.
-        lambda_anode = 0.01 # Un valore molto piccolo, come nel tuo codice.
+        if effective_grid_voltage <= 0:
+            return 0.0 # Cutoff
 
-        ia_current = self.Kp_A * (V_eff_g**self.X) * (1.0 + lambda_anode * v_anode_cathode)
+        # La corrente di placca è influenzata dalla tensione di placca e di griglia schermo
+        # Questo è un modello comportamentale, non un modello fisico completo di pentodo.
+        # Per un modello più rigoroso, si dovrebbe considerare la partizione di corrente
+        # tra placca e griglia schermo e la saturazione di placca.
         
-        return max(0.0, ia_current) # Assicurati che la corrente non sia mai negativa
+        # Un approccio comune è usare una funzione di saturazione per la placca (es. arctan, tanh)
+        # per modellare il "ginocchio" della curva di placca.
+        # Per ora, usiamo una dipendenza lineare dalla tensione di placca per semplicità,
+        # ma questo è un punto da migliorare per fedeltà.
+        
+        # La corrente totale (placca + griglia schermo) dipende principalmente da Vgk e Vg2k
+        total_current = self.Kp * (effective_grid_voltage)**self.Ex
 
-    # --- Metodi per la Jacobiana ---
-    # Utilizzano numerical_jacobian per semplicità e generalità.
+        # Partizione della corrente (molto semplificata: la corrente di placca è una frazione della totale)
+        # In un pentodo, la corrente di placca è quasi indipendente da Vpk una volta in saturazione.
+        # Qui, usiamo un fattore che dipende da Vpk per simulare una leggera dipendenza.
+        # Questo è un placeholder e andrebbe sostituito con un modello pentodo più specifico (es. Koren Pentode, o modelli basati su curve).
+        plate_current_factor = np.tanh(Vpk / 50.0) # Esempio di funzione di saturazione per Vpk
 
-    def calculate_jacobian_elements(self, v_anode, v_grid1, v_grid2, v_cathode):
+        Ip = total_current * plate_current_factor
+        
+        # Aggiungi un limite per evitare valori irrealistici
+        if Ip > 1.0:
+            Ip = 1.0
+
+        return Ip
+
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
         """
-        Calcola gli elementi della matrice Jacobiana per il Pentodo.
-        Restituisce una sottomatrice Jacobiana 4x4 per (Anodo, Griglia1, Griglia2, Catodo).
-
-        J_ij = d(I_i) / d(V_j)
-        Dove I_i è la corrente che *esce* dal nodo i (standard MNA),
-        e V_j è la tensione al nodo j.
-        Correnti: I_Anodo, I_Griglia1, I_Griglia2, I_Catodo.
-        I_Griglia1 e I_Griglia2 sono solitamente molto piccole o zero per i pentodi,
-        a meno di modellare la corrente di griglia. Per ora, le assumiamo zero.
-        I_Catodo = -(I_Anodo + I_Griglia1 + I_Griglia2) = -I_Anodo.
+        Per i componenti non lineari, get_stamps restituisce matrici/vettori vuoti.
+        Il loro contributo è gestito direttamente nel _system_equations del solutore.
         """
-        # Tensioni locali rispetto al catodo
-        v_grid1_cathode = v_grid1 - v_cathode
-        v_grid2_cathode = v_grid2 - v_cathode
-        v_anode_cathode = v_anode - v_cathode
+        return np.zeros((num_total_equations, num_total_equations)), np.zeros(num_total_equations)
 
-        # Matrice Jacobiana 4x4 per i nodi (Anodo, Griglia1, Griglia2, Catodo)
-        jacobian = np.zeros((4, 4))
-
-        # Calcolo delle derivate parziali necessarie usando numerical_jacobian
-        # gm1 = d(Ia)/d(Vg1k)
-        gm1 = numerical_jacobian(lambda v: self.calculate_anode_current(v, v_grid2_cathode, v_anode_cathode), v_grid1_cathode)
-        
-        # gm2 = d(Ia)/d(Vg2k)
-        gm2 = numerical_jacobian(lambda v: self.calculate_anode_current(v_grid1_cathode, v, v_anode_cathode), v_grid2_cathode)
-        
-        # gp = d(Ia)/d(Vak)
-        gp = numerical_jacobian(lambda v: self.calculate_anode_current(v_grid1_cathode, v_grid2_cathode, v), v_anode_cathode)
-
-        # Riempimento della matrice Jacobiana
-        # Righe: Correnti dai nodi (I_Anode, I_Grid1, I_Grid2, I_Cathode)
-        # Colonne: Variazione delle tensioni ai nodi (V_Anode, V_Grid1, V_Grid2, V_Cathode)
-
-        # Riga 0: Corrente di Anodo (Ia)
-        jacobian[0, 0] = gp                     # d(Ia)/d(Va)
-        jacobian[0, 1] = gm1                    # d(Ia)/d(Vg1)
-        jacobian[0, 2] = gm2                    # d(Ia)/d(Vg2)
-        jacobian[0, 3] = -(gm1 + gm2 + gp)      # d(Ia)/d(Vk) (dal KCL Ia + Ig1 + Ig2 + Ik = 0)
-
-        # Righe 1 e 2: Correnti di Griglia (Ig1, Ig2) - Assumiamo Ig1 = 0, Ig2 = 0 per ora
-        # Se volessimo modellare Ig1 e Ig2 (per Vg1k > 0 o Vg2k > 0), avremmo bisogno di
-        # funzioni calculate_grid1_current() e calculate_grid2_current() e le loro Jacobian.
-        jacobian[1, :] = 0.0 # Riga per I_Grid1
-        jacobian[2, :] = 0.0 # Riga per I_Grid2
-
-        # Riga 3: Corrente di Catodo (Ik = -(Ia + Ig1 + Ig2) = -Ia per Ig=0)
-        jacobian[3, 0] = -gp                    # d(-Ia)/d(Va)
-        jacobian[3, 1] = -gm1                   # d(-Ia)/d(Vg1)
-        jacobian[3, 2] = -gm2                   # d(-Ia)/d(Vg2)
-        jacobian[3, 3] = (gm1 + gm2 + gp)       # d(-Ia)/d(Vk)
-
-        return jacobian
-
-    def __str__(self):
-        return f"Pentode({self.name}, mu={self.mu:.1f}, Kp={self.Kp:.1f} mA/V^{self.X:.1f})"
