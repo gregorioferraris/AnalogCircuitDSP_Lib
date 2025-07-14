@@ -25,6 +25,7 @@ class MicrophoneUtility:
         self.microphone = microphone
         self.fir_coeffs = None # Coefficienti FIR del filtro
         self.sample_rate = 44100 # Frequenza di campionamento di default, da impostare o passare
+        self._filter_zi = None # Stato interno del filtro per elaborazione campione per campione
 
     def set_sample_rate(self, sample_rate: int):
         """Imposta la frequenza di campionamento per il calcolo del filtro."""
@@ -89,11 +90,40 @@ class MicrophoneUtility:
         # fir_coeffs /= np.sum(fir_coeffs) # Solo se il guadagno DC deve essere 1
 
         self.fir_coeffs = fir_coeffs
+        
+        # Inizializza lo stato del filtro (zi) per l'elaborazione campione per campione
+        # zi è lo stato iniziale del filtro, calcolato per un ingresso nullo
+        _, self._filter_zi = lfilter(self.fir_coeffs, 1.0, np.zeros(len(self.fir_coeffs) - 1), zi=np.zeros(len(self.fir_coeffs) - 1))
+        
         return fir_coeffs
+
+    def reset_filter_state(self):
+        """Resetta lo stato interno del filtro FIR."""
+        if self.fir_coeffs is not None:
+            self._filter_zi = np.zeros(len(self.fir_coeffs) - 1)
+        else:
+            self._filter_zi = None
+
+    def process_sample(self, input_acoustic_sample: float) -> float:
+        """
+        Applica il filtro FIR pre-calcolato a un singolo campione acustico.
+        Gestisce lo stato interno del filtro.
+        Args:
+            input_acoustic_sample (float): Singolo campione di pressione acustica.
+        Returns:
+            float: Singolo campione di segnale elettrico in uscita dal microfono (Volt).
+        """
+        if self.fir_coeffs is None or self._filter_zi is None:
+            raise ValueError("Il filtro FIR non è stato ancora calcolato o lo stato non è inizializzato. Chiamare export_as_fir prima.")
+        
+        # Applica il filtro a un singolo campione, aggiornando lo stato
+        output_sample, self._filter_zi = lfilter(self.fir_coeffs, 1.0, [input_acoustic_sample], zi=self._filter_zi)
+        return output_sample[0] # lfilter restituisce un array, prendiamo il primo elemento
 
     def process_audio_signal(self, input_acoustic_signal: np.ndarray) -> np.ndarray:
         """
-        Applica il filtro FIR pre-calcolato a un segnale acustico in ingresso.
+        Applica il filtro FIR pre-calcolato a un intero segnale acustico in ingresso.
+        Questo metodo resetta lo stato del filtro prima di elaborare l'intero array.
         Args:
             input_acoustic_signal (np.ndarray): Segnale di pressione acustica (es. da un file WAV).
         Returns:
@@ -102,8 +132,10 @@ class MicrophoneUtility:
         if self.fir_coeffs is None:
             raise ValueError("Il filtro FIR non è stato ancora calcolato. Chiamare export_as_fir prima.")
         
-        # Applica il filtro FIR al segnale di input
-        # lfilter è efficiente per l'applicazione di filtri FIR
+        # Resetta lo stato del filtro prima di elaborare un nuovo segnale completo
+        self.reset_filter_state()
+        
+        # Applica il filtro FIR all'intero segnale di input
         output_electrical_signal = lfilter(self.fir_coeffs, 1.0, input_acoustic_signal)
         return output_electrical_signal
 
@@ -227,24 +259,31 @@ if __name__ == "__main__":
     print(f"\nRibbon Mic FIR Coeffs ({len(fir_coeffs_ribbon)} tap): {fir_coeffs_ribbon[:5]}...")
 
     # --- Come usare in un loop di simulazione (concettuale) ---
-    print("\n--- Esempio di integrazione in un loop di simulazione ---")
+    print("\n--- Esempio di integrazione in un loop di simulazione (campione per campione) ---")
     # Immagina di avere un segnale di pressione acustica (es. da un'onda sonora simulata)
-    acoustic_pressure_signal = np.random.randn(sample_rate) * 0.5 # 1 secondo di "pressione acustica"
+    # Per dimostrare l'elaborazione campione per campione, creiamo un segnale più lungo.
+    total_samples = sample_rate * 2 # 2 secondi di "pressione acustica"
+    acoustic_pressure_signal = np.random.randn(total_samples) * 0.5 # Rumore bianco
 
-    # Processa il segnale acustico con l'utility del microfono
-    electrical_output_signal = mic_utility_condenser.process_audio_signal(acoustic_pressure_signal)
+    # Reset dello stato del filtro prima di iniziare la simulazione campione per campione
+    mic_utility_condenser.reset_filter_state() 
 
-    print(f"Segnale elettrico di output del microfono (primi 5 campioni): {electrical_output_signal[:5]}...")
+    electrical_output_signal_per_sample = np.zeros(total_samples)
+    for i in range(total_samples):
+        current_acoustic_pressure = acoustic_pressure_signal[i]
+        electrical_output_signal_per_sample[i] = mic_utility_condenser.process_sample(current_acoustic_pressure)
 
-    # Questo 'electrical_output_signal' può essere usato per aggiornare una VoltageSource
+    print(f"Segnale elettrico di output del microfono (primi 5 campioni): {electrical_output_signal_per_sample[:5]}...")
+    print(f"Segnale elettrico di output del microfono (ultimi 5 campioni): {electrical_output_signal_per_sample[-5:]}...")
+
+    # Questo 'electrical_output_signal_per_sample' può essere usato per aggiornare una VoltageSource
     # nel tuo circuito MNA ad ogni passo temporale.
     # Esempio concettuale nel tuo MnaSolver.solve_transient loop:
     # for i, t in enumerate(time_points):
     #     current_acoustic_pressure = acoustic_pressure_signal[i] # Preleva il campione di pressione
-    #     mic_electrical_output = mic_utility_condenser.process_audio_signal(np.array([current_acoustic_pressure]))[0]
+    #     mic_electrical_output = mic_utility_condenser.process_sample(current_acoustic_pressure) # Usa il nuovo metodo
     #     # Trova la VoltageSource nel circuito che rappresenta l'uscita del microfono
     #     # mic_output_vs = next((c for c in self.circuit.get_voltage_sources() if c.name == "MicOutputVS"), None)
     #     # if mic_output_vs:
     #     #     mic_output_vs.set_voltage(mic_electrical_output)
     #     # ... poi continua con il normale processo di risoluzione MNA ...
-
