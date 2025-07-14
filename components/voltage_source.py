@@ -1,69 +1,60 @@
 # components/voltage_source.py
+import numpy as np
+from components.component import Component
 
-class VoltageSource:
-    """
-    Rappresenta una sorgente di tensione ideale (DC per ora).
-    Aggiunge una riga/colonna aggiuntiva nella matrice MNA per la corrente della sorgente.
-    """
-    def __init__(self, name: str, nodes: dict, voltage: float = 0.0):
+class VoltageSource(Component):
+    def __init__(self, name: str, node_plus: str, node_minus: str, initial_voltage: float = 0.0):
         """
-        Inizializza una sorgente di tensione.
-
+        Inizializza una sorgente di tensione indipendente.
         Args:
-            name (str): Il nome unico della sorgente di tensione (es. 'V1', 'VCC').
-            nodes (dict): Un dizionario con i nomi dei nodi:
-                          {'pos': 'nome_nodo_positivo', 'neg': 'nome_nodo_negativo'}.
-            voltage (float): La tensione in Volt fornita dalla sorgente (V_pos - V_neg).
-                             Per la DC analysis, è un valore costante.
-                             Per l'AC/Transient, questo può essere l'ampiezza o il valore DC.
+            name (str): Nome univoco dell'istanza (es. "V_in", "VCC").
+            node_plus (str): Nome del nodo positivo.
+            node_minus (str): Nome del nodo negativo.
+            initial_voltage (float): Valore iniziale della tensione (per sorgenti DC o come base).
         """
-        if not isinstance(name, str) or not name:
-            raise ValueError("Il nome della sorgente di tensione deve essere una stringa non vuota.")
-        if not isinstance(nodes, dict) or 'pos' not in nodes or 'neg' not in nodes:
-            raise ValueError("I nodi della sorgente di tensione devono includere 'pos' e 'neg'.")
-        if not isinstance(voltage, (int, float)):
-            raise ValueError("La tensione deve essere un numero.")
+        super().__init__(name, node_plus, node_minus)
+        self._voltage_value = initial_voltage # Valore attuale della sorgente
+        self.current_index = -1 # Indice della riga/colonna per la corrente della sorgente nel sistema MNA
 
-        self.name = name
-        self.nodes = nodes
-        self.voltage = float(voltage)
-        self.index = -1  # Indice assegnato dal solutore MNA per la variabile di corrente
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
+        """
+        Restituisce i contributi della sorgente di tensione alla matrice MNA (stamp_A) e al vettore RHS (stamp_B).
+        Una sorgente di tensione aggiunge una riga e una colonna extra al sistema MNA.
+        """
+        stamp_A = np.zeros((num_total_equations, num_total_equations))
+        stamp_B = np.zeros(num_total_equations)
 
-    def set_nodes(self, pos_node: str, neg_node: str):
-        """
-        Imposta i nomi dei nodi a cui la sorgente di tensione è collegata.
-        """
-        self.nodes['pos'] = pos_node
-        self.nodes['neg'] = neg_node
+        node_plus_id, node_minus_id = self.node_ids
+        vs_current_idx = self.current_index # Indice della corrente della sorgente nel vettore delle incognite
 
-    def get_node_names(self) -> dict:
-        """
-        Restituisce i nomi dei nodi a cui la sorgente di tensione è collegata.
-        """
-        return self.nodes
+        # Contributi alla KCL ai nodi (corrente della Vs)
+        # La corrente esce dal nodo positivo ed entra nel nodo negativo
+        if node_plus_id != 0: stamp_A[node_plus_id, vs_current_idx] += 1
+        if node_minus_id != 0: stamp_A[node_minus_id, vs_current_idx] -= 1
 
-    def get_voltage(self) -> float:
-        """
-        Restituisce il valore della tensione della sorgente.
-        """
-        return self.voltage
-    
-    def set_mna_index(self, index: int):
-        """
-        Imposta l'indice della variabile di corrente associata a questa sorgente di tensione
-        nella matrice MNA. Questo indice sarà >= num_nodes.
-        """
-        self.index = index
+        # Equazione della sorgente di tensione: V_node_plus - V_node_minus = V_source
+        if node_plus_id != 0: stamp_A[vs_current_idx, node_plus_id] += 1
+        if node_minus_id != 0: stamp_A[vs_current_idx, node_minus_id] -= 1
+        
+        stamp_B[vs_current_idx] = self.get_voltage(time) # Il valore della sorgente
 
-    def __str__(self):
-        return f"VoltageSource(name='{self.name}', nodes={self.nodes}, voltage={self.voltage:.2f}V)"
+        return stamp_A, stamp_B
 
-# Esempio di utilizzo
-if __name__ == "__main__":
-    v_source = VoltageSource(name="V_test", nodes={'pos': 'node_A', 'neg': 'gnd'}, voltage=5.0)
-    print(v_source)
-    print(f"Tensione: {v_source.get_voltage()}V")
-    print(f"Nodi: {v_source.get_node_names()}")
+    def get_voltage(self, time: float) -> float:
+        """
+        Restituisce il valore della tensione della sorgente al tempo specificato.
+        Questo metodo può essere sovrascritto per definire segnali dipendenti dal tempo (AC, impulso, ecc.).
+        """
+        # Per default, restituisce il valore DC o l'ultimo valore impostato
+        return self._voltage_value
 
-    v_source_batt = VoltageSource(name="Battery", nodes={'pos': 'VCC', 'neg': 'node_X'}, voltage=9.0)
-    print(v_source_batt)
+    def set_voltage(self, value: float):
+        """
+        Imposta il valore della tensione della sorgente. Utile per sorgenti controllate esternamente.
+        """
+        self._voltage_value = value
+
+    def _set_current_index(self, index: int):
+        """Metodo interno chiamato dal solutore per assegnare l'indice della corrente della sorgente."""
+        self.current_index = index
+
