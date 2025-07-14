@@ -1,54 +1,39 @@
+# components/resistor.py
 import numpy as np
+from components.component import Component
 
-class Resistor:
-    """
-    Modello fisico per un resistore.
-    """
-    def __init__(self, resistance=1e3):
+class Resistor(Component):
+    def __init__(self, name: str, node1: str, node2: str, resistance: float):
         """
-        Inizializza il resistore.
-
+        Inizializza un resistore.
         Args:
-            resistance (float): Il valore di resistenza in Ohm. Default 1 kOhm.
+            name (str): Nome univoco dell'istanza (es. "R1").
+            node1 (str): Nome del primo nodo di connessione.
+            node2 (str): Nome del secondo nodo di connessione.
+            resistance (float): Valore della resistenza in Ohm.
         """
-        if resistance <= 0:
-            raise ValueError("La resistenza deve essere un valore positivo.")
-        self.R = float(resistance)
-        print(f"Resistore creato con R = {self.R} Ohm.")
+        super().__init__(name, node1, node2)
+        self.resistance = resistance
 
-    def get_resistance(self):
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
         """
-        Restituisce il valore di resistenza del componente.
+        Restituisce i contributi del resistore alla matrice MNA (stamp_A) e al vettore RHS (stamp_B).
         """
-        return self.R
+        stamp_A = np.zeros((num_total_equations, num_total_equations))
+        stamp_B = np.zeros(num_total_equations)
 
-    def calculate_current(self, voltage_difference):
-        """
-        Calcola la corrente che scorre attraverso il resistore data la differenza di potenziale.
-        (Legge di Ohm: I = V/R)
+        node1_id, node2_id = self.node_ids # Accedi agli ID numerici dei nodi
 
-        Args:
-            voltage_difference (float or np.ndarray): Differenza di potenziale (V) ai capi del resistore.
+        G = 1.0 / self.resistance
 
-        Returns:
-            float or np.ndarray: Corrente (A) che scorre attraverso il resistore.
-        """
-        return voltage_difference / self.R
+        # Contributi alla matrice MNA (ammettenze)
+        # Assumiamo che il nodo 0 sia il ground e non lo gestiamo esplicitamente qui,
+        # ma il solutore principale fisserà la sua tensione a 0.
+        if node1_id != 0: stamp_A[node1_id, node1_id] += G
+        if node2_id != 0: stamp_A[node2_id, node2_id] += G
+        if node1_id != 0 and node2_id != 0:
+            stamp_A[node1_id, node2_id] -= G
+            stamp_A[node2_id, node1_id] -= G
 
-    def __str__(self):
-        return f"Resistore(R={self.R} Ohm)"
+        return stamp_A, stamp_B
 
-# Esempio di utilizzo (puoi metterlo in main.py o in un test)
-if __name__ == "__main__":
-    r1 = Resistor(1000)
-    v_diff = 5  # Volt
-    current = r1.calculate_current(v_diff)
-    print(f"Con {v_diff}V, la corrente è {current}A")
-
-    r2 = Resistor(resistance=2.2e3) # 2.2 kOhm
-    print(r2)
-
-    try:
-        r_invalid = Resistor(0)
-    except ValueError as e:
-        print(f"Errore previsto: {e}")
