@@ -1,79 +1,63 @@
 # components/zener_diode.py
-
 import numpy as np
-from utils.constants import Q, K, T_ROOM, VT_ROOM
+from components.component import Component
 
-class ZenerDiode:
-    def __init__(self, Vz=5.6, Iz_test=1e-3, Rz=10.0, saturation_current=1e-14, emission_coefficient=1.0):
+class ZenerDiode(Component):
+    def __init__(self, name: str, anode_node: str, cathode_node: str,
+                 Is: float = 1e-14, N: float = 1.0, Vt: float = 0.0258, Vz: float = 5.1, Iz: float = 1e-3, Rz: float = 10.0):
         """
-        Simula un diodo Zener.
+        Inizializza un diodo Zener.
+        Modella la conduzione in polarizzazione diretta (come un diodo normale)
+        e la rottura in polarizzazione inversa alla tensione Zener.
         Args:
-            Vz (float): Tensione Zener nominale (Volt).
-            Iz_test (float): Corrente di test a cui Vz è specificata (Ampere).
-            Rz (float): Resistenza dinamica nella regione Zener (Ohm).
-            saturation_current (float): Corrente di saturazione inversa (per la regione forward).
-            emission_coefficient (float): Coefficiente di emissione (per la regione forward).
+            name (str): Nome univoco dell'istanza (es. "ZD1").
+            anode_node (str): Nome del nodo dell'anodo.
+            cathode_node (str): Nome del nodo del catodo.
+            Is (float): Corrente di saturazione inversa (per la parte diodo normale).
+            N (float): Fattore di idealità (per la parte diodo normale).
+            Vt (float): Tensione termica (kT/q).
+            Vz (float): Tensione Zener (tensione di rottura inversa).
+            Iz (float): Corrente di test Zener (corrente alla quale Vz è specificata).
+            Rz (float): Resistenza dinamica Zener (resistenza nella regione di rottura).
         """
-        self.Vz = float(Vz) # Zener voltage (magnitudine)
-        self.Iz_test = float(Iz_test) # Test current for Zener voltage
-        self.Rz = float(Rz) # Zener dynamic resistance
-        self.Is = float(saturation_current) # Forward saturation current
-        self.n = float(emission_coefficient) # Forward emission coefficient
-        self.Vt = VT_ROOM # Thermal voltage
+        super().__init__(name, anode_node, cathode_node)
+        self.Is = Is
+        self.N = N
+        self.Vt = Vt
+        self.Vz = Vz
+        self.Iz = Iz
+        self.Rz = Rz
 
-        # Calcola un parametro Vbd per la regione di breakdown Zener
-        # Vz = Vbd + Iz_test * Rz
-        # Vbd = Vz - Iz_test * Rz (approssimazione)
-        # Usiamo un modello basato sul diodo per la regione Zener inversa.
-        # Un modo comune è modellare la regione inversa come:
-        # I_R = -Iz * exp(-(V_z + Vd) / (n_z * Vt))
-        # dove V_z è la tensione zener e Vd è la tensione applicata (negativa).
-        # Per semplicità, useremo un modello di diodo inverso con una resistenza.
+    def calculate_current(self, Vd: float) -> float:
+        """
+        Calcola la corrente attraverso il diodo Zener data la tensione ai suoi capi (Vd = V_anode - V_cathode).
+        Modella la conduzione in avanti e la rottura Zener in inversa.
+        """
+        current = 0.0
 
-    def calculate_current(self, voltage_difference):
-        """
-        Calcola la corrente che scorre attraverso il diodo Zener.
-        Considera la regione di forward e la regione di breakdown Zener.
-        """
-        if voltage_difference >= 0:
-            # Regione di polarizzazione diretta (come un diodo normale)
-            exponent_arg = voltage_difference / (self.n * self.Vt)
-            if isinstance(exponent_arg, np.ndarray):
-                exponent_arg = np.clip(exponent_arg, None, 700)
+        # Conduzione in avanti (Vd > 0) - come un diodo normale
+        if Vd >= 0:
+            if Vd / (self.N * self.Vt) > 700:
+                current = self.Is * (np.exp(700) - 1)
             else:
-                exponent_arg = min(exponent_arg, 700)
-            return self.Is * (np.exp(exponent_arg) - 1.0)
+                current = self.Is * (np.exp(Vd / (self.N * self.Vt)) - 1)
+        # Rottura Zener in inversa (Vd < 0 e |Vd| > Vz)
         else:
-            # Regione di polarizzazione inversa (Zener)
-            # La tensione Zener è Vz, ma la tensione applicata è negativa (-V_app).
-            # Se |V_app| > Vz, la corrente inversa aumenta rapidamente.
-            # Modello semplificato: una volta superato Vz, la corrente è guidata dalla resistenza Rz.
-            if voltage_difference < -self.Vz: # Entrato nella regione Zener
-                # Corrente = (Tensione applicata - Tensione Zener) / Resistenza Zener
-                # La tensione applicata è negativa, quindi V_diff - (-Vz)
-                return (voltage_difference + self.Vz) / self.Rz # Corrente negativa
+            # Modello semplificato per la rottura Zener
+            # La corrente aumenta rapidamente una volta superata Vz
+            if Vd < -self.Vz:
+                # Modello lineare nella regione di rottura
+                current = (Vd + self.Vz) / self.Rz - self.Iz # La corrente è negativa
             else:
-                # Corrente di fuga molto piccola in polarizzazione inversa prima del breakdown
-                return -self.Is # -Is è la corrente di fuga inversa
+                # Corrente di saturazione inversa (molto piccola) prima della rottura
+                current = -self.Is # Corrente inversa negativa
 
-    def calculate_conductance(self, voltage_difference):
-        """
-        Calcola la conduttanza dinamica (differenziale) del diodo Zener.
-        """
-        if voltage_difference >= 0:
-            # Conduttanza in polarizzazione diretta (come diodo normale)
-            exponent_arg = voltage_difference / (self.n * self.Vt)
-            if isinstance(exponent_arg, np.ndarray):
-                exponent_arg = np.clip(exponent_arg, None, 700)
-            else:
-                exponent_arg = min(exponent_arg, 700)
-            return (self.Is / (self.n * self.Vt)) * np.exp(exponent_arg)
-        else:
-            # Conduttanza in polarizzazione inversa (Zener)
-            if voltage_difference < -self.Vz:
-                return 1.0 / self.Rz # Conduttanza dinamica nella regione Zener
-            else:
-                return 1e-9 # Conduttanza molto bassa (quasi zero) in regione di fuga inversa
+        return current
 
-    def __str__(self):
-        return f"ZenerDiode(Vz={self.Vz:.1f}V, Rz={self.Rz:.1f} Ohm)"
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
+        """
+        Per i componenti non lineari, get_stamps restituisce matrici/vettori vuoti.
+        Il loro contributo è gestito direttamente nel _system_equations del solutore.
+        """
+        return np.zeros((num_total_equations, num_total_equations)), np.zeros(num_total_equations)
+
