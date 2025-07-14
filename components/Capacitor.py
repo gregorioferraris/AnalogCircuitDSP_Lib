@@ -1,51 +1,61 @@
 # components/capacitor.py
+import numpy as np
+from components.component import Component
 
-class Capacitor:
-    def __init__(self, capacitance, sample_rate=48000):
-        if capacitance <= 0:
-            raise ValueError("La capacità deve essere un valore positivo.")
-        if sample_rate <= 0:
-            raise ValueError("La frequenza di campionamento deve essere un valore positivo.")
-
-        self.C = float(capacitance)
-        self.sample_rate = float(sample_rate)
-        self.Ts = 1.0 / self.sample_rate # Periodo di campionamento
-
-        # Stato interno per l'integrazione numerica (es. Trapezoidale)
-        self.prev_voltage = 0.0
-        self.prev_current = 0.0 # Potrebbe non essere usata direttamente, dipende dall'integrazione
-
-    def calculate_current(self, voltage_difference):
+class Capacitor(Component):
+    def __init__(self, name: str, node1: str, node2: str, capacitance: float):
         """
-        Calcola la corrente del condensatore basandosi sulla variazione di tensione.
-        Per un modello più accurato in un solutore di circuito, la corrente è
-        implicita nella risoluzione del sistema di equazioni.
-        Questo metodo è più per un calcolo diretto dV/dt in un contesto semplice.
+        Inizializza un condensatore.
+        Args:
+            name (str): Nome univoco dell'istanza (es. "C1").
+            node1 (str): Nome del primo nodo di connessione.
+            node2 (str): Nome del secondo nodo di connessione.
+            capacitance (float): Valore della capacità in Farad.
         """
-        # In un solutore MNA, la corrente è definita implicitamente dall'equazione
-        # di integrazione trapezoidale che coinvolge lo stato precedente.
-        # Questa implementazione è per un calcolo diretto della corrente data una tensione,
-        # che potrebbe non essere direttamente usata nell'MNA per la corrente del condensatore.
-        # Spesso, in MNA, si usa la forma: I_C(t) = C/Ts * (V_C(t) - V_C(t-Ts))
-        # dove V_C(t-Ts) è prev_voltage.
-        # Quindi, se usata, la corrente dipende anche dallo stato precedente.
-        # Per semplicità, qui è la corrente in regime stazionario data una V, non una variazione.
-        # L'MNA gestisce la dinamica.
-        # Per ora restituisce 0, la logica dinamica è nel solutore MNA
-        return 0.0 # La corrente dinamica viene gestita nel solutore tramite integrazione.
+        super().__init__(name, node1, node2)
+        self.capacitance = capacitance
+        # Variabili di stato per l'integrazione trapezoidale
+        self.v_prev = 0.0 # Tensione ai capi del condensatore al passo precedente
+        self.i_prev = 0.0 # Corrente attraverso il condensatore al passo precedente
 
-
-    def update_state(self, current_voltage, current_current=None):
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
         """
-        Aggiorna lo stato interno del condensatore per il prossimo passo di simulazione.
+        Restituisce i contributi del condensatore alla matrice MNA (stamp_A) e al vettore RHS (stamp_B)
+        usando il metodo trapezoidale.
         """
-        self.prev_voltage = current_voltage
-        if current_current is not None:
-            self.prev_current = current_current
+        stamp_A = np.zeros((num_total_equations, num_total_equations))
+        stamp_B = np.zeros(num_total_equations)
 
-    def get_previous_voltage(self):
-        """Restituisce la tensione ai capi del condensatore nel passo di tempo precedente."""
-        return self.prev_voltage
+        node1_id, node2_id = self.node_ids
 
-    def __str__(self):
-        return f"Capacitor({self.C*1e6:.2f} uF, Fs={self.sample_rate:.0f} Hz)"
+        # Conduttanza equivalente per il metodo trapezoidale
+        G_eq = 2.0 * self.capacitance / dt
+
+        # Contributi alla matrice MNA (parte dipendente dalla tensione attuale)
+        if node1_id != 0: stamp_A[node1_id, node1_id] += G_eq
+        if node2_id != 0: stamp_A[node2_id, node2_id] += G_eq
+        if node1_id != 0 and node2_id != 0:
+            stamp_A[node1_id, node2_id] -= G_eq
+            stamp_A[node2_id, node1_id] -= G_eq
+
+        # Contributi al vettore RHS (parte dipendente dallo stato precedente)
+        # I_eq = G_eq * V_C_prev + I_C_prev
+        # Questa corrente viene sottratta al nodo positivo e aggiunta al nodo negativo
+        V_C_prev = prev_solution[node1_id] - prev_solution[node2_id] # Tensione ai capi al passo precedente
+        i_eq = G_eq * V_C_prev + self.i_prev # Corrente equivalente
+
+        if node1_id != 0: stamp_B[node1_id] -= i_eq
+        if node2_id != 0: stamp_B[node2_id] += i_eq
+
+        return stamp_A, stamp_B
+
+    def update_state(self, v_curr: float, i_curr: float):
+        """
+        Aggiorna lo stato interno del condensatore per il prossimo passo temporale.
+        Args:
+            v_curr (float): Tensione ai capi del condensatore al passo attuale.
+            i_curr (float): Corrente attraverso il condensatore al passo attuale.
+        """
+        self.v_prev = v_curr
+        self.i_prev = i_curr
+
