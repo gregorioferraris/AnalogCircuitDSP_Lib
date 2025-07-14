@@ -1,42 +1,39 @@
 # components/diode.py
-
 import numpy as np
-from utils.constants import Q, K, T_ROOM, VT_ROOM # Importa costanti fisiche
+from components.component import Component
 
-class Diode:
-    def __init__(self, saturation_current=1e-14, emission_coefficient=1.0):
-        self.Is = float(saturation_current) # Corrente di saturazione inversa
-        self.n = float(emission_coefficient) # Coefficiente di emissione (idealità)
-        self.Vt = VT_ROOM # Tensione termica (kT/q)
-
-    def calculate_current(self, voltage_difference):
+class Diode(Component):
+    def __init__(self, name: str, anode_node: str, cathode_node: str, Is: float = 1e-14, N: float = 1.0, Vt: float = 0.0258):
         """
-        Calcola la corrente che scorre attraverso il diodo usando il modello di Shockley.
-        Id = Is * (exp(Vd / (n*Vt)) - 1)
+        Inizializza un diodo usando il modello di Shockley.
+        Args:
+            name (str): Nome univoco dell'istanza (es. "D1").
+            anode_node (str): Nome del nodo dell'anodo.
+            cathode_node (str): Nome del nodo del catodo.
+            Is (float): Corrente di saturazione inversa.
+            N (float): Fattore di idealità.
+            Vt (float): Tensione termica (kT/q).
         """
-        # Limita l'esponente per prevenire overflow con tensioni elevate
-        exponent_arg = voltage_difference / (self.n * self.Vt)
-        if isinstance(exponent_arg, np.ndarray):
-            # Per gestire array di tensioni (es. per plotting)
-            exponent_arg = np.clip(exponent_arg, None, 700) # Limite ragionevole per np.exp
-        else:
-            exponent_arg = min(exponent_arg, 700) # Limite per singolo valore
+        super().__init__(name, anode_node, cathode_node)
+        self.Is = Is
+        self.N = N
+        self.Vt = Vt
 
-        return self.Is * (np.exp(exponent_arg) - 1.0)
-
-    def calculate_conductance(self, voltage_difference):
+    def calculate_current(self, Vd: float) -> float:
         """
-        Calcola la conduttanza dinamica (differenziale) del diodo.
-        gd = d(Id)/d(Vd) = Is / (n*Vt) * exp(Vd / (n*Vt))
+        Calcola la corrente attraverso il diodo data la tensione ai suoi capi (Vd = V_anode - V_cathode).
+        Usa l'equazione di Shockley.
         """
-        # Limita l'esponente per prevenire overflow
-        exponent_arg = voltage_difference / (self.n * self.Vt)
-        if isinstance(exponent_arg, np.ndarray):
-            exponent_arg = np.clip(exponent_arg, None, 700)
-        else:
-            exponent_arg = min(exponent_arg, 700)
+        # Evita overflow per Vd molto grandi
+        if Vd / (self.N * self.Vt) > 700: # Limite approssimato per exp()
+            return self.Is * (np.exp(700) - 1)
+        
+        return self.Is * (np.exp(Vd / (self.N * self.Vt)) - 1)
 
-        return (self.Is / (self.n * self.Vt)) * np.exp(exponent_arg)
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
+        """
+        Per i componenti non lineari, get_stamps restituisce matrici/vettori vuoti.
+        Il loro contributo è gestito direttamente nel _system_equations del solutore.
+        """
+        return np.zeros((num_total_equations, num_total_equations)), np.zeros(num_total_equations)
 
-    def __str__(self):
-        return f"Diode(Is={self.Is:.1e}, n={self.n:.1f})"
