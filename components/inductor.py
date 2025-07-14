@@ -1,44 +1,68 @@
 # components/inductor.py
+import numpy as np
+from components.component import Component
 
-class Inductor:
-    def __init__(self, inductance, sample_rate=48000):
-        if inductance <= 0:
-            raise ValueError("L'induttanza deve essere un valore positivo.")
-        if sample_rate <= 0:
-            raise ValueError("La frequenza di campionamento deve essere un valore positivo.")
-
-        self.L = float(inductance)
-        self.sample_rate = float(sample_rate)
-        self.Ts = 1.0 / self.sample_rate # Periodo di campionamento
-
-        # Stato interno per l'integrazione numerica (es. Trapezoidale)
-        self.prev_current = 0.0
-        self.prev_voltage = 0.0 # Potrebbe non essere usata direttamente, dipende dall'integrazione
-
-    def calculate_current(self, voltage_difference):
+class Inductor(Component):
+    def __init__(self, name: str, node1: str, node2: str, inductance: float):
         """
-        Calcola la corrente che scorre attraverso l'induttore basandosi sulla tensione.
-        Per un modello più accurato in un solutore di circuito, la corrente è
-        implicita nella risoluzione del sistema di equazioni differenziali.
+        Inizializza un induttore.
+        Args:
+            name (str): Nome univoco dell'istanza (es. "L1").
+            node1 (str): Nome del primo nodo di connessione.
+            node2 (str): Nome del secondo nodo di connessione.
+            inductance (float): Valore dell'induttanza in Henry.
         """
-        # In un solutore MNA, la corrente è una variabile ausiliaria e la sua dinamica
-        # è gestita implicitamente tramite l'equazione dell'induttore e lo stato precedente.
-        # Questa implementazione è per un calcolo diretto V = L di/dt, non direttamente usato nell'MNA.
-        # Per ora restituisce 0, la logica dinamica è nel solutore MNA
-        return 0.0 # La corrente dinamica viene gestita nel solutore tramite integrazione.
+        super().__init__(name, node1, node2)
+        self.L = inductance
+        # Variabili di stato per l'integrazione trapezoidale
+        self.i_prev = 0.0 # Corrente attraverso l'induttore al passo precedente
+        self.v_prev = 0.0 # Tensione ai capi dell'induttore al passo precedente
 
-    def update_state(self, current_voltage=None, current_current=None):
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
         """
-        Aggiorna lo stato interno dell'induttore per il prossimo passo di simulazione.
+        Restituisce i contributi dell'induttore alla matrice MNA (stamp_A) e al vettore RHS (stamp_B)
+        usando il metodo trapezoidale.
         """
-        if current_current is not None:
-            self.prev_current = current_current
-        if current_voltage is not None:
-            self.prev_voltage = current_voltage
+        stamp_A = np.zeros((num_total_equations, num_total_equations))
+        stamp_B = np.zeros(num_total_equations)
 
-    def get_previous_current(self):
-        """Restituisce la corrente attraverso l'induttore nel passo di tempo precedente."""
-        return self.prev_current
+        node1_id, node2_id = self.node_ids
 
-    def __str__(self):
-        return f"Inductor({self.L*1e3:.2f} mH, Fs={self.sample_rate:.0f} Hz)"
+        # Resistenza equivalente per il metodo trapezoidale
+        # R_eq = 2L / dt
+        # G_eq = dt / (2L)
+        G_eq = dt / (2.0 * self.L)
+
+        # Contributi alla matrice MNA (ammettenze)
+        if node1_id != 0: stamp_A[node1_id, node1_id] += G_eq
+        if node2_id != 0: stamp_A[node2_id, node2_id] += G_eq
+        if node1_id != 0 and node2_id != 0:
+            stamp_A[node1_id, node2_id] -= G_eq
+            stamp_A[node2_id, node1_id] -= G_eq
+
+        # Contributi al vettore RHS (parte dipendente dallo stato precedente)
+        # V_eq = I_L_prev * (2L / dt) + V_L_prev
+        # Questa tensione viene applicata come sorgente di tensione equivalente
+        V_eq = self.i_prev * (2.0 * self.L / dt) + self.v_prev
+
+        # L'induttore è come una sorgente di tensione in serie con una resistenza
+        # La corrente che esce da node1 e entra in node2 è (V_node1 - V_node2 - V_eq) / (2L/dt)
+        # O, in termini di MNA, aggiungiamo una corrente equivalente al vettore B
+        # I_eq = G_eq * V_eq
+        i_eq = G_eq * V_eq
+
+        if node1_id != 0: stamp_B[node1_id] -= i_eq
+        if node2_id != 0: stamp_B[node2_id] += i_eq
+
+        return stamp_A, stamp_B
+
+    def update_state(self, v_curr: float, i_curr: float):
+        """
+        Aggiorna lo stato interno dell'induttore per il prossimo passo temporale.
+        Args:
+            v_curr (float): Tensione ai capi dell'induttore al passo attuale.
+            i_curr (float): Corrente attraverso l'induttore al passo attuale.
+        """
+        self.v_prev = v_curr
+        self.i_prev = i_curr
+
