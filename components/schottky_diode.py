@@ -1,47 +1,42 @@
 # components/schottky_diode.py
-
 import numpy as np
-from utils.constants import Q, K, T_ROOM, VT_ROOM
+from components.component import Component
 
-class SchottkyDiode:
-    def __init__(self, saturation_current=1e-10, emission_coefficient=1.05):
+class SchottkyDiode(Component):
+    def __init__(self, name: str, anode_node: str, cathode_node: str, Is: float = 1e-9, N: float = 1.05, Vt: float = 0.0258):
         """
-        Simula un diodo Schottky.
-        Ha una caduta di tensione diretta inferiore e una riaccensione più veloce.
+        Inizializza un diodo Schottky.
+        Simile a un diodo standard, ma con tensione di forward più bassa e recupero inverso più veloce.
         Args:
-            saturation_current (float): Corrente di saturazione inversa (più alta dei diodi PN).
-            emission_coefficient (float): Coefficiente di emissione (vicino a 1).
+            name (str): Nome univoco dell'istanza (es. "SD1").
+            anode_node (str): Nome del nodo dell'anodo.
+            cathode_node (str): Nome del nodo del catodo.
+            Is (float): Corrente di saturazione inversa (tipicamente più alta dei diodi PN).
+            N (float): Fattore di idealità (spesso vicino a 1).
+            Vt (float): Tensione termica (kT/q).
         """
-        self.Is = float(saturation_current)
-        self.n = float(emission_coefficient)
-        self.Vt = VT_ROOM
+        super().__init__(name, anode_node, cathode_node)
+        self.Is = Is
+        self.N = N
+        self.Vt = Vt
 
-    def calculate_current(self, voltage_difference):
+    def calculate_current(self, Vd: float) -> float:
         """
-        Calcola la corrente che scorre attraverso il diodo Schottky usando il modello di Shockley.
+        Calcola la corrente attraverso il diodo Schottky data la tensione ai suoi capi (Vd = V_anode - V_cathode).
+        Usa l'equazione di Shockley.
         """
-        # Limita l'esponente per prevenire overflow con tensioni elevate
-        exponent_arg = voltage_difference / (self.n * self.Vt)
-        if isinstance(exponent_arg, np.ndarray):
-            exponent_arg = np.clip(exponent_arg, None, 700) # Limite ragionevole per np.exp
-        else:
-            exponent_arg = min(exponent_arg, 700) # Limite per singolo valore
+        if Vd / (self.N * self.Vt) > 700: # Limite per evitare overflow
+            return self.Is * (np.exp(700) - 1)
+        
+        current = self.Is * (np.exp(Vd / (self.N * self.Vt)) - 1)
+        
+        # Assicurati che la corrente non sia negativa in polarizzazione inversa (idealmente)
+        return max(0.0, current)
 
-        return self.Is * (np.exp(exponent_arg) - 1.0)
-
-    def calculate_conductance(self, voltage_difference):
+    def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
         """
-        Calcola la conduttanza dinamica (differenziale) del diodo Schottky.
-        gd = d(Id)/d(Vd) = Is / (n*Vt) * exp(Vd / (n*Vt))
+        Per i componenti non lineari, get_stamps restituisce matrici/vettori vuoti.
+        Il loro contributo è gestito direttamente nel _system_equations del solutore.
         """
-        # Limita l'esponente per prevenire overflow
-        exponent_arg = voltage_difference / (self.n * self.Vt)
-        if isinstance(exponent_arg, np.ndarray):
-            exponent_arg = np.clip(exponent_arg, None, 700)
-        else:
-            exponent_arg = min(exponent_arg, 700)
+        return np.zeros((num_total_equations, num_total_equations)), np.zeros(num_total_equations)
 
-        return (self.Is / (self.n * self.Vt)) * np.exp(exponent_arg)
-
-    def __str__(self):
-        return f"SchottkyDiode(Is={self.Is:.1e}, n={self.n:.2f})"
