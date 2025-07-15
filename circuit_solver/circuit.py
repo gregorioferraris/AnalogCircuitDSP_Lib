@@ -1,159 +1,146 @@
+# circuit_solver/circuit.py
+
 import numpy as np
+from collections import defaultdict
 from components.component import Component
-from components.resistor import Resistor
-from components.capacitor import Capacitor
-from components.inductor import Inductor
 from components.voltage_source import VoltageSource
-from components.current_source import CurrentSource
-from components.diode import Diode
-from components.transformer import Transformer
-from components.splitter import Splitter
-from circuit_solver.subcircuit import Subcircuit # Nuovo import
+from components.splitter import Splitter # Importa il nuovo Splitter
 
 class Circuit:
+    """
+    Rappresenta il circuito elettrico, gestendo i nodi, i componenti
+    e la mappatura tra nomi dei nodi/componenti e ID numerici.
+    """
     def __init__(self):
-        self.components = []
-        self.node_names = ['0'] # Nodo di terra per convenzione
-        self.node_map = {'0': 0}
-        self.num_nodes = 1
-        self.voltage_source_count = 0 
-        self.transformer_count = 0    
-        self.splitter_current_count = 0 
+        self.nodes = {'0': 0}  # Dizionario per mappare i nomi dei nodi ai loro ID numerici. '0' è il ground.
+        self.node_map = {'0': 0} # Mappa inversa: nome -> ID
+        self.next_node_id = 1  # Il prossimo ID numerico disponibile per un nodo
+        self.components = []   # Lista di tutti i componenti nel circuito
+        self.voltage_sources = [] # Lista delle sorgenti di tensione (aggiungono variabili ausiliarie)
+        self.splitters = [] # Lista degli splitter (possono aggiungere variabili ausiliarie)
+        self.subcircuits = [] # Lista dei sottocircuiti
+
+    def add_node(self, node_name: str):
+        """
+        Aggiunge un nodo al circuito se non esiste già.
+        Args:
+            node_name (str): Il nome del nodo da aggiungere.
+        Returns:
+            int: L'ID numerico del nodo.
+        """
+        if node_name not in self.nodes:
+            self.nodes[node_name] = self.next_node_id
+            self.node_map[node_name] = self.next_node_id
+            self.next_node_id += 1
+        return self.nodes[node_name]
 
     def add_component(self, component: Component):
-        self.components.append(component)
-        
-        # Registra i nomi dei nodi e assegna ID numerici se non già presenti
-        for node_name in component.node_names:
-            if node_name not in self.node_map:
-                self.node_map[node_name] = self.num_nodes
-                self.node_names.append(node_name)
-                self.num_nodes += 1
-        
-        # Assegna gli ID numerici ai nodi del componente
-        component.node_ids = tuple(self.node_map[name] for name in component.node_names)
-
-        # Pre-assegna gli indici per le correnti delle sorgenti di tensione
-        if isinstance(component, VoltageSource):
-            component._set_current_index(self.num_nodes + self.voltage_source_count)
-            self.voltage_source_count += 1
-        
-        # Pre-assegna gli indici per le correnti dei trasformatori
-        elif isinstance(component, Transformer):
-            ip_idx = self.num_nodes + self.voltage_source_count + (self.transformer_count * 2)
-            is_idx = ip_idx + 1
-            component._set_current_indices(ip_idx, is_idx)
-            self.transformer_count += 1
-        
-        # Pre-assegna gli indici per le correnti dello splitter
-        elif isinstance(component, Splitter):
-            start_idx = self.num_nodes + self.voltage_source_count + (self.transformer_count * 2) + self.splitter_current_count
-            indices = [start_idx + i for i in range(component.num_outputs)]
-            component._set_output_current_indices(indices)
-            self.splitter_current_count += component.num_outputs
-
-
-    def get_num_total_equations(self):
-        """Restituisce il numero totale di equazioni (nodi + correnti Vs + correnti Trasformatore + correnti Splitter)."""
-        return self.num_nodes + self.voltage_source_count + (self.transformer_count * 2) + self.splitter_current_count
-
-    def connect_blocks(self, source_block: Subcircuit, dest_block: Subcircuit,
-                       source_output_names: list[str] = None, dest_input_names: list[str] = None):
         """
-        Connette i nodi di uscita di un blocco (Subcircuit) ai nodi di ingresso di un altro blocco.
-        Questo metodo integra i componenti di entrambi i sottocircuiti nel circuito principale
-        e unisce i nodi specificati.
-
+        Aggiunge un componente al circuito e assegna gli ID numerici ai suoi nodi.
         Args:
-            source_block (Subcircuit): Il blocco sorgente (es. un preamplificatore).
-            dest_block (Subcircuit): Il blocco di destinazione (es. un amplificatore di potenza).
-            source_output_names (list[str], optional): Nomi specifici dei nodi di uscita del blocco sorgente da connettere.
-                                                       Se None, usa tutti i nodi di uscita predefiniti del blocco sorgente.
-            dest_input_names (list[str], optional): Nomi specifici dei nodi di ingresso del blocco di destinazione da connettere.
-                                                    Se None, usa tutti i nodi di ingresso predefiniti del blocco di destinazione.
-        Raises:
-            ValueError: Se il numero di nodi da connettere non corrisponde o i nodi non sono definiti.
+            component (Component): L'istanza del componente da aggiungere.
         """
-        # Integra i componenti del blocco sorgente nel circuito principale
-        for comp in source_block.components:
+        # Assegna un ID univoco al componente
+        component.component_id = len(self.components)
+
+        # Assegna gli ID numerici ai nodi del componente
+        node_ids = []
+        for node_name in component.node_names_str:
+            node_ids.append(self.add_node(node_name))
+        component._set_node_ids(tuple(node_ids)) # Passa la tupla degli ID
+
+        self.components.append(component)
+
+        # Categorizza i componenti che aggiungono variabili ausiliarie
+        if isinstance(component, VoltageSource):
+            self.voltage_sources.append(component)
+        if isinstance(component, Splitter): # Aggiungi il nuovo tipo di componente
+            self.splitters.append(component)
+
+        print(f"Aggiunto componente: {component.name} ({component.__class__.__name__})")
+
+    def add_block(self, subcircuit: 'Subcircuit'):
+        """
+        Aggiunge un sottocircuito (blocco) al circuito principale.
+        Args:
+            subcircuit (Subcircuit): L'istanza del sottocircuito da aggiungere.
+        """
+        self.subcircuits.append(subcircuit)
+        # Aggiungi tutti i componenti interni del sottocircuito al circuito principale
+        for comp in subcircuit.components:
             self.add_component(comp)
         
-        # Integra i componenti del blocco di destinazione nel circuito principale
-        for comp in dest_block.components:
-            self.add_component(comp)
+        # Mappa i nodi di input/output del sottocircuito ai nodi del circuito principale
+        # Questo è gestito dalla logica di Subcircuit.connect_blocks() o aggiungendo i nodi
+        # direttamente al circuito principale.
+        for node_name in subcircuit.nodes:
+            self.add_node(node_name)
 
-        # Determina i nodi da connettere
-        outputs_to_connect = source_output_names if source_output_names is not None else source_block.get_output_node_names()
-        inputs_to_connect = dest_input_names if dest_input_names is not None else dest_block.get_input_node_names()
+        print(f"Aggiunto sottocircuito: {subcircuit.name}")
 
-        if len(outputs_to_connect) != len(inputs_to_connect):
-            raise ValueError(f"Il numero di nodi di uscita ({len(outputs_to_connect)}) del blocco sorgente '{source_block.name}' "
-                             f"non corrisponde al numero di nodi di ingresso ({len(inputs_to_connect)}) del blocco di destinazione '{dest_block.name}'.")
+    def get_num_nodes(self) -> int:
+        """Restituisce il numero totale di nodi nel circuito (inclusi i nodi interni dei sottocircuiti)."""
+        return self.next_node_id
 
-        # Esegui le connessioni
-        for i in range(len(outputs_to_connect)):
-            src_node_name = outputs_to_connect[i]
-            dest_node_name = inputs_to_connect[i]
+    def get_components(self) -> list[Component]:
+        """Restituisce la lista di tutti i componenti nel circuito."""
+        return self.components
 
-            # Ottieni gli ID MNA dei nodi nel contesto del circuito principale
-            # Se i nodi non sono stati aggiunti (dovrebbero esserlo tramite add_component), questo fallirà
-            if src_node_name not in self.node_map:
-                raise ValueError(f"Nodo di uscita '{src_node_name}' del blocco '{source_block.name}' non trovato nel circuito principale.")
-            if dest_node_name not in self.node_map:
-                raise ValueError(f"Nodo di ingresso '{dest_node_name}' del blocco '{dest_block.name}' non trovato nel circuito principale.")
+    def get_voltage_sources(self) -> list[VoltageSource]:
+        """Restituisce la lista delle sorgenti di tensione nel circuito."""
+        return self.voltage_sources
+    
+    def get_splitters(self) -> list[Splitter]:
+        """Restituisce la lista degli splitter nel circuito."""
+        return self.splitters
 
-            # Connetti i nodi: forza il nodo di destinazione ad avere lo stesso ID del nodo sorgente
-            # Questo è il "cable" che unisce i pezzi
-            # Utilizziamo wire_nodes per gestire la mappatura
-            self.wire_nodes(src_node_name, dest_node_name)
+    def connect_blocks(self, source_block: 'Subcircuit', dest_block: 'Subcircuit',
+                       source_output_names: list[str], dest_input_names: list[str]):
+        """
+        Connette i nodi di output di un blocco ai nodi di input di un altro blocco.
+        Questo metodo assicura che i nodi siano gli stessi nel sistema MNA.
+        Args:
+            source_block (Subcircuit): Il blocco sorgente.
+            dest_block (Subcircuit): Il blocco di destinazione.
+            source_output_names (list[str]): Nomi dei nodi di output del blocco sorgente da connettere.
+            dest_input_names (list[str]): Nomi dei nodi di input del blocco di destinazione da connettere.
+        """
+        if len(source_output_names) != len(dest_input_names):
+            raise ValueError("Il numero di nodi di output sorgente deve corrispondere al numero di nodi di input destinazione.")
+
+        for src_name, dest_name in zip(source_output_names, dest_input_names):
+            # Assicurati che i nodi esistano in entrambi i sottocircuiti
+            if src_name not in source_block.nodes:
+                raise ValueError(f"Nodo '{src_name}' non trovato nel sottocircuito sorgente '{source_block.name}'.")
+            if dest_name not in dest_block.nodes:
+                raise ValueError(f"Nodo '{dest_name}' non trovato nel sottocircuito destinazione '{dest_block.name}'.")
+
+            # Ottieni l'ID del nodo sorgente nel circuito principale
+            src_node_id = self.nodes[source_block.nodes[src_name]]
             
-            print(f"Connesso '{source_block.name}.{src_node_name}' a '{dest_block.name}.{dest_node_name}'.")
-
-    def wire_nodes(self, *node_names_to_connect: str):
-        """
-        Connette un insieme di nodi tra loro, forzandoli ad essere lo stesso nodo logico.
-        Elettricamente, significa che tutti i nodi passati avranno lo stesso ID numerico.
-        Questo metodo è robusto e gestisce il remapping dei componenti esistenti.
-        """
-        if not node_names_to_connect:
-            return
-
-        # Il primo nodo nel gruppo sarà il "master"
-        master_node_name = node_names_to_connect[0]
-        if master_node_name not in self.node_map:
-            self.node_map[master_node_name] = self.num_nodes
-            self.node_names.append(master_node_name)
-            self.num_nodes += 1
-        master_node_id = self.node_map[master_node_name]
-
-        # Raccogli i nodi che devono essere remappati
-        nodes_to_remap = []
-        for i in range(1, len(node_names_to_connect)):
-            current_node_name = node_names_to_connect[i]
-            if current_node_name in self.node_map and self.node_map[current_node_name] != master_node_id:
-                nodes_to_remap.append((current_node_name, self.node_map[current_node_name]))
-            self.node_map[current_node_name] = master_node_id
-            if current_node_name not in self.node_names:
-                self.node_names.append(current_node_name)
-
-        # Esegui il remapping degli ID nei componenti già aggiunti
-        if nodes_to_remap:
-            print(f"Eseguendo remapping per nodi: {nodes_to_remap} al master ID {master_node_id}")
+            # Riassegna il nodo di destinazione all'ID del nodo sorgente
+            # Questo unisce i due nodi nel circuito principale
+            old_dest_node_id = self.nodes[dest_block.nodes[dest_name]]
+            
+            # Aggiorna il nodo di destinazione per tutti i componenti che lo usano
             for comp in self.components:
-                # node_ids è una tupla, quindi la convertiamo in lista per modificarla
-                new_node_ids = list(comp.node_ids) 
-                
-                changed = False
-                for i, node_id in enumerate(new_node_ids):
-                    for old_name, old_id in nodes_to_remap:
-                        if node_id == old_id:
-                            new_node_ids[i] = master_node_id
-                            changed = True
-                            break # Esci dal loop dei nodi da remappare per questo pin
-                
-                if changed:
-                    comp.node_ids = tuple(new_node_ids)
-                    # print(f"  Aggiornato {comp.name}: nuovi node_ids {comp.node_ids}")
+                # Se il componente ha nodi esplicitamente mappati per nome (come i pin_names)
+                # o se i suoi node_ids sono una tupla che possiamo modificare
+                if comp.node_ids is not None:
+                    new_node_ids = list(comp.node_ids)
+                    updated = False
+                    for i, node_id in enumerate(new_node_ids):
+                        if node_id == old_dest_node_id:
+                            new_node_ids[i] = src_node_id
+                            updated = True
+                    if updated:
+                        comp._set_node_ids(tuple(new_node_ids))
+            
+            # Aggiorna la mappatura principale del circuito
+            # Rimuovi il vecchio nodo di destinazione e mappa il suo nome al nuovo ID
+            del self.nodes[dest_block.nodes[dest_name]]
+            self.nodes[dest_block.nodes[dest_name]] = src_node_id
+            self.node_map[dest_block.nodes[dest_name]] = src_node_id
 
-        print(f"Nodi {node_names_to_connect} connessi al nodo logico '{master_node_name}' (ID: {master_node_id}).")
+            print(f"Connesso '{source_block.name}:{src_name}' (ID {src_node_id}) a '{dest_block.name}:{dest_name}' (ex ID {old_dest_node_id}, ora {src_node_id}).")
 
