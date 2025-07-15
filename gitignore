@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyd
+*.so
+*.dylib
+
+# Cython
+*.c
+*.cpp
+
+# Jupyter/IDE files
+.vscode/
+.idea/
+.ipynb_checkpoints/
+
+# JUCE / IDE build files
+Builds/
+*.jucer.user
+*.xcworkspace
+*.xcodeproj/
+*.sln
+*.vcxproj*
+*.filters
+*.user
+*.suo
+*.ilk
+*.pdb
+*.ipch
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.exp
+*.vst3
+*.component
+*.aaxplugin
+*.clap
