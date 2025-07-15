@@ -20,8 +20,8 @@ from utils.digital_converter import simulate_vintage_adc_dac
 
 # Importa i nuovi componenti funzionali e il PluginProcessor
 from components.external_effect_wrapper import ExternalEffectWrapper
-from components.splitter import Splitter # Nuovo
-from components.summation import Summation # Nuovo
+from components.splitter import Splitter # Splitter è ora un componente MNA!
+from components.summation import Summation # Rimane funzionale
 from utils.plugin_processor import PluginProcessor, ArrayVoltageSource
 
 # Classe helper per sorgente sinusoidale (già definita)
@@ -55,29 +55,31 @@ def main():
         diode_saturation_current=1e-12
     )
 
-    # 2. Splitter (Funzionale)
-    # Avrà due uscite: 'output_a' e 'output_b'
-    main_splitter = Splitter("MainSplitter", "splitter_in", ["splitter_out_a", "splitter_out_b"])
+    # 2. Splitter (ORA È UN COMPONENTE MNA!)
+    # Prende l'output dello stadio analogico di ingresso e lo splitta
+    # Le sue uscite saranno nodi reali nel circuito MNA.
+    main_splitter = Splitter("MainSplitter", "analog_stage_out", "splitter_out_a_node", "splitter_out_b_node")
 
-    # 3. Processing A (Interno alla libreria - Distorsione)
+    # 3. Processing A (Interno alla libreria - Distorsione) - Rimane funzionale
+    # Questo effetto prenderà il segnale dal nodo 'splitter_out_a_node'
     distortion_effect_a = ExternalEffectWrapper(
-        "Distortion_A", "dist_in_a", "dist_out_a",
+        "Distortion_A", "dist_in_a", "dist_out_a", # Nodi concettuali per l'effetto
         effect_type='distortion_simple',
         param1=8.0, # Fattore di drive più alto
         sample_rate=sample_rate_for_processing
     )
 
-    # 4. Processing B (Interno alla libreria - Ritardo)
+    # 4. Processing B (Interno alla libreria - Ritardo) - Rimane funzionale
+    # Questo effetto prenderà il segnale dal nodo 'splitter_out_b_node'
     delay_effect_b = ExternalEffectWrapper(
-        "Delay_B", "delay_in_b", "delay_out_b",
+        "Delay_B", "delay_in_b", "delay_out_b", # Nodi concettuali per l'effetto
         effect_type='delay',
         param1=0.005, # 5 ms di ritardo
         sample_rate=sample_rate_for_processing
     )
-    # Resetta lo stato del delay per ogni nuova simulazione se necessario
     delay_effect_b.reset_state() 
 
-    # 5. Summation (Funzionale)
+    # 5. Summation (Funzionale) - Rimane funzionale
     # Somma l'output del processing A e l'output del processing B
     main_summation = Summation("MainSummation", ["sum_in_1", "sum_in_2"], "sum_out")
 
@@ -93,44 +95,45 @@ def main():
 
     # --- CONFIGURAZIONE E ESECUZIONE DEL FLUSSO DI LAVORO ---
 
-    # 1. Input -> Stadio Analogico di Ingresso (MNA)
-    print("\n-- Fase 1: Input -> Stadio Analogico di Ingresso (MNA) --")
+    # 1. Ingresso Raw -> Stadio Analogico di Ingresso (MNA) -> Splitter (MNA)
+    print("\n-- Fase 1: Ingresso Raw -> Stadio Analogico di Ingresso -> Splitter (Tutto MNA) --")
     circuit_segment_1 = Circuit()
     circuit_segment_1.add_block(input_analog_stage)
     circuit_segment_1.add_component(SineVoltageSource("Audio_In", "input_signal_raw", "0", amplitude=0.8, frequency=200.0)) # Segnale più moderato
+    
+    # Aggiungi lo Splitter direttamente al circuito MNA
+    circuit_segment_1.add_component(main_splitter)
 
     solver_1 = MnaSolver(circuit_segment_1)
     times_segment_1, solution_history_1 = solver_1.simulate_transient(0, sim_time, time_step)
-    signal_out_of_segment_1 = solution_history_1[:, circuit_segment_1.node_map['analog_stage_out']]
     
-    # 2. Cable -> Splitter (Funzionale)
-    print("\n-- Fase 2: Cable -> Splitter (Funzionale) --")
-    # Il segnale 'signal_out_of_segment_1' è il nostro "cable"
-    splitter_outputs = main_splitter.process_block(signal_out_of_segment_1)
-    signal_splitter_out_a = splitter_outputs["splitter_out_a"]
-    signal_splitter_out_b = splitter_outputs["splitter_out_b"]
+    # Ora i segnali splittati vengono letti direttamente dai nodi di uscita dello Splitter nel circuito MNA
+    signal_splitter_out_a = solution_history_1[:, circuit_segment_1.node_map['splitter_out_a_node']]
+    signal_splitter_out_b = solution_history_1[:, circuit_segment_1.node_map['splitter_out_b_node']]
     
-    # 3. Splitter Output A -> S Processing A (PluginProcessor -> ExternalEffectWrapper)
-    print("\n-- Fase 3: Splitter Output A -> S Processing A (PluginProcessor) --")
+    # 2. Splitter Output A -> S Processing A (PluginProcessor -> ExternalEffectWrapper)
+    # Il segnale 'signal_splitter_out_a' è il "cable" che entra nel primo processore funzionale
+    print("\n-- Fase 2: Splitter Output A -> S Processing A (PluginProcessor) --")
     processor_a = PluginProcessor(distortion_effect_a, sample_rate_for_processing)
     processed_signal_a_vs = processor_a.process_segment(signal_splitter_out_a, times_segment_1)
     
-    # 4. Splitter Output B -> S Processing B (PluginProcessor -> ExternalEffectWrapper)
-    print("\n-- Fase 4: Splitter Output B -> S Processing B (PluginProcessor) --")
+    # 3. Splitter Output B -> S Processing B (PluginProcessor -> ExternalEffectWrapper)
+    # Il segnale 'signal_splitter_out_b' è il "cable" che entra nel secondo processore funzionale
+    print("\n-- Fase 3: Splitter Output B -> S Processing B (PluginProcessor) --")
     processor_b = PluginProcessor(delay_effect_b, sample_rate_for_processing)
     processed_signal_b_vs = processor_b.process_segment(signal_splitter_out_b, times_segment_1)
 
-    # 5. Cable -> Summation (Funzionale)
-    print("\n-- Fase 5: Cable -> Summation (Funzionale) --")
+    # 4. Cable -> Summation (Funzionale)
     # I segnali elaborati (voltages dagli ArrayVoltageSource) sono i nostri "cable"
+    print("\n-- Fase 4: Cable -> Summation (Funzionale) --")
     summation_inputs = {
         "sum_in_1": processed_signal_a_vs.voltages,
         "sum_in_2": processed_signal_b_vs.voltages
     }
     final_summed_signal = main_summation.process_block(summation_inputs)
 
-    # 6. Cable -> Stadio Analogico di Uscita (MNA)
-    print("\n-- Fase 6: Cable -> Stadio Analogico di Uscita (MNA) --")
+    # 5. Cable -> Stadio Analogico di Uscita (MNA)
+    print("\n-- Fase 5: Cable -> Stadio Analogico di Uscita (MNA) --")
     circuit_segment_2 = Circuit()
     circuit_segment_2.add_block(output_analog_stage)
     
@@ -148,11 +151,14 @@ def main():
     times_segment_2, solution_history_2 = solver_2.simulate_transient(0, sim_time, time_step)
     
     # --- ESTRAZIONE E PLOTTING DEI RISULTATI ---
-    print("\n-- Fase 7: Plotting dei Risultati --")
+    print("\n-- Fase 6: Plotting dei Risultati --")
     if len(solution_history_2) > 0:
         # Segnali per il plotting
         v_input_raw = solution_history_1[:, circuit_segment_1.node_map['input_signal_raw']]
-        v_pre_splitter = signal_out_of_segment_1
+        v_pre_splitter = solution_history_1[:, circuit_segment_1.node_map['analog_stage_out']] # Output dello stadio analogico in ingresso
+        v_splitter_out_a = solution_history_1[:, circuit_segment_1.node_map['splitter_out_a_node']] # Output dello splitter A
+        v_splitter_out_b = solution_history_1[:, circuit_segment_1.node_map['splitter_out_b_node']] # Output dello splitter B
+
         v_post_distortion_a = processed_signal_a_vs.voltages
         v_post_delay_b = processed_signal_b_vs.voltages
         v_summed = final_summed_signal
@@ -163,36 +169,39 @@ def main():
         plt.subplot(4, 1, 1)
         plt.plot(times_segment_1, v_input_raw, label='1. Ingresso Raw (V)', alpha=0.7)
         plt.plot(times_segment_1, v_pre_splitter, label='2. Uscita Pre-Splitter (V)', linestyle='--', alpha=0.8)
-        plt.title('Ingresso e Uscita Stadio Analogico Iniziale')
+        plt.title('Ingresso e Uscita Stadio Analogico Iniziale (Pre-Splitter)')
         plt.xlabel('Tempo (s)')
         plt.ylabel('Tensione (V)')
         plt.grid(True)
         plt.legend()
 
         plt.subplot(4, 1, 2)
-        plt.plot(times_segment_1, v_pre_splitter, label='2. Uscita Pre-Splitter (V)', linestyle='--', alpha=0.8)
-        plt.plot(times_segment_1, v_post_distortion_a, label='3a. Segnale Post-Distorsione (V)', linestyle=':', linewidth=2, color='orange')
-        plt.plot(times_segment_1, v_post_delay_b, label='3b. Segnale Post-Ritardo (V)', linestyle='-.', linewidth=2, color='green')
-        plt.title('Percorsi Elaborati dallo Splitter')
+        plt.plot(times_segment_1, v_pre_splitter, label='2. Ingresso Splitter (V)', linestyle='--', alpha=0.8)
+        plt.plot(times_segment_1, v_splitter_out_a, label='2a. Uscita Splitter A (V)', linestyle=':', linewidth=2, color='orange')
+        plt.plot(times_segment_1, v_splitter_out_b, label='2b. Uscita Splitter B (V)', linestyle='-.', linewidth=2, color='green')
+        plt.title('Comportamento dello Splitter MNA')
         plt.xlabel('Tempo (s)')
         plt.ylabel('Tensione (V)')
         plt.grid(True)
         plt.legend()
 
         plt.subplot(4, 1, 3)
-        plt.plot(times_segment_1, v_post_distortion_a, label='3a. Segnale Post-Distorsione (V)', linestyle=':', linewidth=2, color='orange')
-        plt.plot(times_segment_1, v_post_delay_b, label='3b. Segnale Post-Ritardo (V)', linestyle='-.', linewidth=2, color='green')
-        plt.plot(times_segment_1, v_summed, label='4. Segnale Sommato (V)', linewidth=2, color='blue')
-        plt.title('Sommatoria dei Segnali Elaborati')
+        plt.plot(times_segment_1, v_splitter_out_a, label='3a. Ingresso Distorsione (V)', linestyle=':', linewidth=2, color='orange')
+        plt.plot(times_segment_1, v_post_distortion_a, label='3a. Uscita Distorsione (V)', linestyle='--', alpha=0.8, color='red')
+        plt.plot(times_segment_1, v_splitter_out_b, label='3b. Ingresso Ritardo (V)', linestyle='-.', linewidth=2, color='green')
+        plt.plot(times_segment_1, v_post_delay_b, label='3b. Uscita Ritardo (V)', linestyle='--', alpha=0.8, color='blue')
+        plt.title('Elaborazione dei Percorsi Paralleli')
         plt.xlabel('Tempo (s)')
         plt.ylabel('Tensione (V)')
         plt.grid(True)
         plt.legend()
 
         plt.subplot(4, 1, 4)
-        plt.plot(times_segment_1, v_summed, label='4. Segnale Sommato (V)', linewidth=2, color='blue')
-        plt.plot(times_segment_2, v_final_output, label='5. Uscita Finale (Post-Analog Stage) (V)', linewidth=2, color='red')
-        plt.title('Uscita Finale dopo lo Stadio Analogico')
+        plt.plot(times_segment_1, v_post_distortion_a, label='4a. Ingresso Sommatoria (Distorsione) (V)', linestyle=':', linewidth=2, color='orange')
+        plt.plot(times_segment_1, v_post_delay_b, label='4b. Ingresso Sommatoria (Ritardo) (V)', linestyle='-.', linewidth=2, color='green')
+        plt.plot(times_segment_1, v_summed, label='5. Segnale Sommato (V)', linewidth=2, color='blue')
+        plt.plot(times_segment_2, v_final_output, label='6. Uscita Finale (Post-Analog Stage) (V)', linewidth=2, color='red')
+        plt.title('Sommatoria e Uscita Finale')
         plt.xlabel('Tempo (s)')
         plt.ylabel('Tensione (V)')
         plt.grid(True)
