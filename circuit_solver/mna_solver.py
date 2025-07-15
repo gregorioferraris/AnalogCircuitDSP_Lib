@@ -1,365 +1,269 @@
+# circuit_solver/mna_solver.py
+
 import numpy as np
-from circuit_solver.circuit import Circuit
-from components.resistor import Resistor
-from components.capacitor import Capacitor
-from components.inductor import Inductor
+from scipy.optimize import fsolve
+from components.component import Component
 from components.voltage_source import VoltageSource
-from components.current_source import CurrentSource
 from components.diode import Diode
+from components.mosfet import MOSFET
+from components.triode import Triode
+from components.pentode import Pentode
+from components.rectifier_tube import RectifierTube
+from components.led import LED
+from components.ldr import LDR
+from components.jfet import JFET
+from components.bjt import BJT
+from components.speaker_driver import SpeakerDriver
+from components.closed_box_cabinet import ClosedBoxCabinet
+from components.bass_reflex_cabinet import BassReflexCabinet
+from components.delay_line import DelayLine
+from components.splitter import Splitter # Importa il nuovo Splitter
 
 class MnaSolver:
-    def __init__(self, circuit: Circuit):
+    """
+    Risolve il circuito usando l'Analisi Nodal Modificata (MNA) per simulazioni transitorie.
+    """
+    def __init__(self, circuit):
         self.circuit = circuit
-        self.num_total_equations = circuit.get_num_total_equations()
+        self.num_nodes = circuit.get_num_nodes()
+        self.num_voltage_sources = len(circuit.get_voltage_sources())
+        self.num_splitter_aux_vars = sum(s.num_outputs for s in circuit.get_splitters()) # Variabili ausiliarie per splitter
         
-        # Variabili per l'integrazione del dominio del tempo
-        self.prev_solution = np.zeros(self.num_total_equations)
-        self.initial_solution_guess = np.zeros(self.num_total_equations)
+        # Dimensione totale del sistema di equazioni MNA
+        self.num_total_equations = self.num_nodes + self.num_voltage_sources + self.num_splitter_aux_vars
 
-        # Memorizza lo stato precedente per i componenti dinamici
-        # (v_C_prev, i_L_prev). Questo è fondamentale per il metodo trapezoidale.
-        self.dynamic_component_states = {}
-        for comp in circuit.components:
-            if isinstance(comp, (Capacitor, Inductor)):
-                # Inizializza con zero o valori appropriati se noti
-                self.dynamic_component_states[comp.name] = {
-                    'v_prev': 0.0,
-                    'i_prev': 0.0
-                }
-            # Se hai SpeakerDriver o RibbonTweeter, inizializza anche il loro stato meccanico
-            # elif isinstance(comp, (SpeakerDriver, RibbonTweeter)):
-            #     self.dynamic_component_states[comp.name] = {
-            #         'v_Le_prev': 0.0, 'i_Le_prev': 0.0,
-            #         'v_Lmech_prev': 0.0, 'i_Lmech_prev': 0.0,
-            #         'v_Cmech_prev': 0.0, 'i_Cmech_prev': 0.0
-            #     }
+        # Assegna gli indici delle variabili ausiliarie alle sorgenti di tensione e agli splitter
+        self._assign_auxiliary_indices()
 
+        # Classifica i componenti per un accesso più rapido nel solutore
+        self.linear_components = []
+        self.dynamic_components = [] # Componenti con stato (C, L)
+        self.nonlinear_components = [] # Componenti non lineari (Diodo, MOSFET, Triodo, ecc.)
+        self.functional_components = [] # Componenti funzionali (DelayLine, LDR, ecc.)
 
-    def solve_dc(self, max_iterations: int = 100, tolerance: float = 1e-6):
+        self._classify_components()
+
+    def _assign_auxiliary_indices(self):
         """
-        Risolve il circuito per lo stato DC (regime stazionario).
-        Per i componenti dinamici (C, L), C diventa un aperto e L un corto.
-        Per i componenti non lineari, usa Newton-Raphson.
+        Assegna gli indici nel vettore delle incognite alle correnti delle sorgenti di tensione
+        e alle correnti ausiliarie degli splitter.
         """
-        print("Starting DC analysis...")
-        current_solution_guess = np.zeros(self.num_total_equations) # Inizia da zero
+        current_aux_idx = self.num_nodes # Inizia dopo gli ID dei nodi
+
+        # Assegna indici alle correnti delle sorgenti di tensione
+        for vs in self.circuit.get_voltage_sources():
+            vs._set_current_index(current_aux_idx)
+            current_aux_idx += 1
         
-        for iteration in range(max_iterations):
-            A_matrix = np.zeros((self.num_total_equations, self.num_total_equations))
-            B_vector = np.zeros(self.num_total_equations)
+        # Assegna indici alle correnti ausiliarie degli splitter
+        for splitter in self.circuit.get_splitters():
+            indices = []
+            for _ in range(splitter.num_outputs):
+                indices.append(current_aux_idx)
+                current_aux_idx += 1
+            splitter._set_output_current_indices(indices)
 
-            # Contributi dei componenti lineari (R) e sorgenti
-            for component in self.circuit.components:
-                if isinstance(component, Resistor):
-                    n1, n2 = component.node_ids
-                    G = 1.0 / component.resistance
-                    if n1 != 0: A_matrix[n1, n1] += G
-                    if n2 != 0: A_matrix[n2, n2] += G
-                    if n1 != 0 and n2 != 0:
-                        A_matrix[n1, n2] -= G
-                        A_matrix[n2, n1] -= G
-                elif isinstance(component, VoltageSource):
-                    n_plus, n_minus = component.node_ids
-                    vs_idx = component.current_index
-                    
-                    if n_plus != 0: A_matrix[n_plus, vs_idx] += 1
-                    if n_minus != 0: A_matrix[n_minus, vs_idx] -= 1
-                    
-                    if n_plus != 0: A_matrix[vs_idx, n_plus] += 1
-                    if n_minus != 0: A_matrix[vs_idx, n_minus] -= 1
-                    B_vector[vs_idx] = component.get_voltage(0) # DC, time = 0
-                elif isinstance(component, CurrentSource):
-                    n_plus, n_minus = component.node_ids
-                    current_val = component.get_current(0) # DC, time = 0
-                    if n_plus != 0: B_vector[n_plus] -= current_val
-                    if n_minus != 0: B_vector[n_minus] += current_val
-                # I condensatori sono aperti in DC, gli induttori sono corti in DC (sono già gestiti dalla matrice A_matrix per i resistori)
-                # La gestione dei componenti dinamici in DC è una semplificazione del metodo trapezoidale con dt -> inf
+    def _classify_components(self):
+        """Classifica i componenti in base al loro tipo per una gestione efficiente."""
+        for comp in self.circuit.get_components():
+            if isinstance(comp, (Diode, MOSFET, Triode, Pentode, RectifierTube, LED, JFET, BJT)):
+                self.nonlinear_components.append(comp)
+            elif isinstance(comp, (DelayLine, LDR)): # LDR è dinamico ma il suo stamp è lineare
+                self.functional_components.append(comp)
+            elif hasattr(comp, 'update_state'): # Condensatori, Induttori, SpeakerDriver, Cabinets
+                self.dynamic_components.append(comp)
+            else: # Resistori, Sorgenti di Corrente, Sorgenti di Tensione, Splitter
+                self.linear_components.append(comp)
 
-            # Contributi dei componenti non lineari (Newton-Raphson)
-            # F(x) = J * dx
-            F_vector = np.zeros(self.num_total_equations) # Vettore residuo
-            J_matrix = np.zeros((self.num_total_equations, self.num_total_equations)) # Matrice Jacobiana
+    def _system_equations(self, x: np.ndarray, dt: float, prev_solution: np.ndarray, time: float) -> np.ndarray:
+        """
+        Definisce il sistema di equazioni MNA (F(x) = 0) per fsolve.
+        Args:
+            x (np.ndarray): Il vettore delle incognite (tensioni ai nodi, correnti delle Vs, correnti ausiliarie).
+            dt (float): Il passo temporale.
+            prev_solution (np.ndarray): La soluzione del passo temporale precedente.
+            time (float): Il tempo attuale della simulazione.
+        Returns:
+            np.ndarray: Il vettore delle equazioni.
+        """
+        # Inizializza la matrice MNA (A) e il vettore RHS (B)
+        # Questi saranno usati per costruire la parte lineare del sistema
+        A = np.zeros((self.num_total_equations, self.num_total_equations))
+        B = np.zeros(self.num_total_equations)
 
-            for component in self.circuit.components:
-                if isinstance(component, Diode):
-                    anode_id, cathode_id = component.node_ids
-                    Vd = current_solution_guess[anode_id] - current_solution_guess[cathode_id]
-                    
-                    # Contributo al vettore F (corrente di Shockley)
-                    Id = component.calculate_current(Vd)
-                    if anode_id != 0: F_vector[anode_id] -= Id
-                    if cathode_id != 0: F_vector[cathode_id] += Id
+        # --- Contributi dei componenti lineari e dinamici ---
+        # Questi vengono aggiunti alla matrice A e al vettore B
+        for comp in self.linear_components + self.dynamic_components:
+            stamp_A, stamp_B = comp.get_stamps(self.num_total_equations, dt, x, prev_solution, time)
+            A += stamp_A
+            B += stamp_B
 
-                    # Contributo alla matrice Jacobiana (conduttanza differenziale)
-                    Gd = component.calculate_conductance(Vd)
-                    if anode_id != 0: J_matrix[anode_id, anode_id] += Gd
-                    if cathode_id != 0: J_matrix[cathode_id, cathode_id] += Gd
-                    if anode_id != 0 and cathode_id != 0:
-                        J_matrix[anode_id, cathode_id] -= Gd
-                        J_matrix[cathode_id, anode_id] -= Gd
-                # Aggiungi qui altri componenti non lineari (Triode, MOSFET, ecc.)
-                # e i loro contributi a F_vector e J_matrix.
-
-            # Assembla il sistema per Newton-Raphson: J * delta_x = -F_linear - F_nonlinear
-            # Dove F_linear è B_vector (il lato RHS dai componenti lineari) e F_nonlinear è F_vector (dai componenti non lineari).
-            # La matrice MNA finale per Newton-Raphson è MNA_linear + J_nonlinear
-            # Il vettore RHS finale per Newton-Raphson è MNA_linear * current_solution_guess - F_nonlinear
-            
-            # Matrice MNA totale per il passo di Newton-Raphson
-            # A_total = A_matrix + J_matrix
-            
-            # Vettore RHS per Newton-Raphson: F(x_k) - J(x_k) * x_k
-            # Per una formulazione standard F(x) = 0: J_k * delta_x_k = -F(x_k)
-            # Dove F(x_k) è la somma delle correnti che lasciano i nodi
-            
-            # Costruiamo il vettore F(x) residuo totale (correnti ai nodi = 0)
-            residual_vector = np.zeros(self.num_total_equations)
-            
-            # Aggiungi i contributi lineari (KCL per R, L, C nel dominio del tempo, e sorgenti)
-            # La logica del get_stamps è per l'assemblaggio di G e B (stamps)
-            # In Newton-Raphson, ricalcoliamo il residuo e la Jacobiana
-            
-            # Per i componenti lineari (Resistor, L/C in DC/TRAP)
-            # R: G * (Vn1 - Vn2)
-            # Vs: V_diff - V_source = 0; I_vs
-            # Is: I_source
-            
-            # Ricostruiamo il residuo e la Jacobiana in ogni iterazione
-            G_linear = np.zeros((self.num_total_equations, self.num_total_equations))
-            b_linear = np.zeros(self.num_total_equations)
-            
-            for component in self.circuit.components:
-                # Per il regime DC, i C sono aperti (G=0, I=0) e gli L sono corti (G=inf, ma gestito implicitamente)
-                # Usiamo solo i contributi DC dei componenti dinamici per semplicità in DC solve.
-                if isinstance(component, Resistor):
-                    n1, n2 = component.node_ids
-                    G = 1.0 / component.resistance
-                    if n1 != 0: G_linear[n1, n1] += G
-                    if n2 != 0: G_linear[n2, n2] += G
-                    if n1 != 0 and n2 != 0:
-                        G_linear[n1, n2] -= G
-                        G_linear[n2, n1] -= G
-                elif isinstance(component, VoltageSource):
-                    n_plus, n_minus = component.node_ids
-                    vs_idx = component.current_index
-                    if n_plus != 0: G_linear[n_plus, vs_idx] += 1
-                    if n_minus != 0: G_linear[n_minus, vs_idx] -= 1
-                    if n_plus != 0: G_linear[vs_idx, n_plus] += 1
-                    if n_minus != 0: G_linear[vs_idx, n_minus] -= 1
-                    b_linear[vs_idx] = component.get_voltage(0)
-                elif isinstance(component, CurrentSource):
-                    n_plus, n_minus = component.node_ids
-                    current_val = component.get_current(0)
-                    if n_plus != 0: b_linear[n_plus] -= current_val
-                    if n_minus != 0: b_linear[n_minus] += current_val
-
-            # Calcola il vettore residuo F(x_k)
-            residual_vector = G_linear @ current_solution_guess - b_linear # KCL equations, and voltage source equations
-
-            # Aggiungi i contributi non lineari al residuo e alla Jacobiana
-            J_nonlinear = np.zeros((self.num_total_equations, self.num_total_equations))
-            for component in self.circuit.components:
-                if isinstance(component, Diode):
-                    anode_id, cathode_id = component.node_ids
-                    Vd = current_solution_guess[anode_id] - current_solution_guess[cathode_id]
-                    
-                    Id = component.calculate_current(Vd)
-                    Gd = component.calculate_conductance(Vd)
-
-                    # Aggiungi la corrente del diodo al residuo
-                    if anode_id != 0: residual_vector[anode_id] += Id
-                    if cathode_id != 0: residual_vector[cathode_id] -= Id
-
-                    # Aggiungi la conduttanza del diodo alla Jacobiana
-                    if anode_id != 0: J_nonlinear[anode_id, anode_id] += Gd
-                    if cathode_id != 0: J_nonlinear[cathode_id, cathode_id] += Gd
-                    if anode_id != 0 and cathode_id != 0:
-                        J_nonlinear[anode_id, cathode_id] -= Gd
-                        J_nonlinear[cathode_id, anode_id] -= Gd
-                # Aggiungi qui la logica per gli altri componenti non lineari.
-                # Per Triode, MOSFET, ecc., la logica sarebbe simile, ma con più terminali e derivate incrociate.
-
-            # Matrice Jacobiana totale per Newton-Raphson: J_total = G_linear + J_nonlinear
-            J_total = G_linear + J_nonlinear
-
-            # Risolvi il sistema per il passo di aggiornamento
-            # J_total * delta_x = -residual_vector
-            try:
-                delta_x = np.linalg.solve(J_total, -residual_vector)
-            except np.linalg.LinAlgError:
-                print("Singular matrix encountered during DC solve. Check circuit topology or component values.")
-                return None
-
-            # Aggiorna la soluzione corrente
-            current_solution_guess += delta_x
-
-            # Controlla la convergenza
-            if np.linalg.norm(delta_x) < tolerance:
-                print(f"DC converged in {iteration + 1} iterations.")
-                self.prev_solution = current_solution_guess
-                return current_solution_guess
+        # --- Contributi dei componenti non lineari (gestiti implicitamente) ---
+        # Per i componenti non lineari, le loro equazioni sono aggiunte direttamente qui.
+        # F(x) = A*x - B - I_nonlinear(x) = 0
+        # Quindi, I_nonlinear(x) viene sottratta dal vettore B.
         
-        print(f"DC did not converge after {max_iterations} iterations.")
-        return None
+        # Inizializza il vettore delle correnti non lineari
+        I_nonlinear = np.zeros(self.num_total_equations)
 
+        for comp in self.nonlinear_components:
+            node_ids = comp.node_ids
+            # Recupera le tensioni ai capi del componente non lineare
+            if isinstance(comp, Diode) or isinstance(comp, SchottkyDiode) or isinstance(comp, ZenerDiode):
+                Vd = x[node_ids[0]] - x[node_ids[1]]
+                current = comp.calculate_current(Vd)
+                if node_ids[0] != 0: I_nonlinear[node_ids[0]] += current
+                if node_ids[1] != 0: I_nonlinear[node_ids[1]] -= current
+            elif isinstance(comp, MOSFET):
+                Vds = x[node_ids[0]] - x[node_ids[2]] # Drain - Source
+                Vgs = x[node_ids[1]] - x[node_ids[2]] # Gate - Source
+                Id = comp.calculate_drain_current(Vgs, Vds)
+                if node_ids[0] != 0: I_nonlinear[node_ids[0]] += Id # Corrente entra nel Drain
+                if node_ids[2] != 0: I_nonlinear[node_ids[2]] -= Id # Corrente esce dal Source
+            elif isinstance(comp, Triode):
+                Vpk = x[node_ids[0]] - x[node_ids[2]] # Plate - Cathode
+                Vgk = x[node_ids[1]] - x[node_ids[2]] # Grid - Cathode
+                Ip = comp.calculate_plate_current(Vgk, Vpk)
+                if node_ids[0] != 0: I_nonlinear[node_ids[0]] += Ip # Corrente entra nella Placca
+                if node_ids[2] != 0: I_nonlinear[node_ids[2]] -= Ip # Corrente esce dal Catodo
+            elif isinstance(comp, Pentode):
+                Vpk = x[comp.node_map['plate']] - x[comp.node_map['cathode']]
+                Vgk = x[comp.node_map['grid']] - x[comp.node_map['cathode']]
+                Vg2k = x[comp.node_map['screen_grid']] - x[comp.node_map['cathode']]
+                Vg3k = x[comp.node_map['suppressor_grid']] - x[comp.node_map['cathode']]
+                Ip = comp.calculate_plate_current(Vgk, Vpk, Vg2k, Vg3k)
+                if comp.node_map['plate'] != 0: I_nonlinear[comp.node_map['plate']] += Ip
+                if comp.node_map['cathode'] != 0: I_nonlinear[comp.node_map['cathode']] -= Ip
+            elif isinstance(comp, RectifierTube):
+                Vd = x[node_ids[0]] - x[node_ids[1]] # Anode - Cathode
+                current = comp.calculate_current(Vd)
+                if node_ids[0] != 0: I_nonlinear[node_ids[0]] += current
+                if node_ids[1] != 0: I_nonlinear[node_ids[1]] -= current
+            elif isinstance(comp, BJT):
+                Vbe = x[node_ids[1]] - x[node_ids[2]] # Base - Emitter
+                Vbc = x[node_ids[1]] - x[node_ids[0]] # Base - Collector (nota: Vbc, non Vcb)
+                Ic, Ib = comp.calculate_currents(Vbe, Vbc)
+                Ie = Ic + Ib # Corrente di emettitore
+                
+                if comp.type == 'npn':
+                    if node_ids[0] != 0: I_nonlinear[node_ids[0]] += Ic # Ic entra nel Collector
+                    if node_ids[1] != 0: I_nonlinear[node_ids[1]] += Ib # Ib entra nella Base
+                    if node_ids[2] != 0: I_nonlinear[node_ids[2]] -= Ie # Ie esce dall'Emitter
+                elif comp.type == 'pnp':
+                    if node_ids[0] != 0: I_nonlinear[node_ids[0]] -= Ic # Ic esce dal Collector
+                    if node_ids[1] != 0: I_nonlinear[node_ids[1]] -= Ib # Ib esce dalla Base
+                    if node_ids[2] != 0: I_nonlinear[node_ids[2]] += Ie # Ie entra nell'Emitter
+            elif isinstance(comp, JFET):
+                Vds = x[node_ids[0]] - x[node_ids[2]] # Drain - Source
+                Vgs = x[node_ids[1]] - x[node_ids[2]] # Gate - Source
+                Id = comp.calculate_drain_current(Vgs, Vds)
+                if node_ids[0] != 0: I_nonlinear[node_ids[0]] += Id # Id entra nel Drain
+                if node_ids[2] != 0: I_nonlinear[node_ids[2]] -= Id # Id esce dal Source
+            # LDR è gestito come un resistore dinamico, quindi è in linear_components.
+            # OpAmp è gestito come sorgente di tensione controllata.
+            # SpeakerDriver, Cabinets sono in dynamic_components.
 
-    def simulate_transient(self, start_time: float, end_time: float, time_step: float,
-                           max_iterations: int = 100, tolerance: float = 1e-6):
+        # Costruisci l'equazione finale: A*x - B_total = 0
+        # B_total = B_linear + I_nonlinear (correnti che escono dai nodi, quindi sottratte)
+        # Equazioni MNA: G*V + C*dV/dt + I_nl = I_s
+        # Con integrazione trapezoidale: G*V_n + (2C/dt)*V_n - (2C/dt)*V_n-1 - I_n-1 = I_s
+        # F(x) = A*x - B_linear - I_nonlinear = 0
+        
+        # Il vettore B contiene già i contributi delle sorgenti indipendenti e dei termini dinamici.
+        # Ora sottraiamo le correnti non lineari (che sono funzioni di x)
+        
+        # Per fsolve, vogliamo F(x) = 0.
+        # Il sistema lineare è A*x = B.
+        # Per i componenti non lineari, la loro corrente è una funzione di x.
+        # Quindi, l'equazione KCL per un nodo diventa: sum(correnti_lineari) + I_non_lineare(x) = 0
+        # Nel nostro sistema A*x = B, questo si traduce in:
+        # A_linear * x - B_linear - I_non_lineare(x) = 0
+        # Quindi, il vettore di residui è (A @ x) - B - I_nonlinear
+        
+        # Nota: il nodo 0 (ground) non ha un'equazione KCL.
+        # La riga 0 della matrice A e del vettore B non viene utilizzata per KCL.
+        # Per convenzione, V_ground = 0.
+        
+        # La riga 0 di F è sempre 0, per mantenere la dimensione.
+        F = (A @ x) - B - I_nonlinear
+        F[0] = x[0] # Impone V_ground = 0
+
+        return F
+
+    def simulate_transient(self, start_time: float, end_time: float, time_step: float) -> tuple:
         """
         Esegue una simulazione transitoria del circuito.
         Args:
             start_time (float): Tempo di inizio della simulazione.
             end_time (float): Tempo di fine della simulazione.
-            time_step (float): Passo temporale per l'integrazione.
+            time_step (float): Passo temporale della simulazione (dt).
         Returns:
-            tuple: (times, solution_history)
+            tuple: (times, solution_history) - Array dei tempi e matrice delle soluzioni.
         """
-        print("Starting transient analysis...")
         times = np.arange(start_time, end_time + time_step, time_step)
+        
+        # Inizializza la soluzione precedente a zero per tutte le incognite
+        prev_solution = np.zeros(self.num_total_equations)
         solution_history = []
 
-        # Risolvi lo stato iniziale DC se non già fatto
-        if np.all(self.prev_solution == 0):
-            self.prev_solution = self.solve_dc()
-            if self.prev_solution is None:
-                print("DC solve failed, cannot proceed with transient simulation.")
-                return [], []
+        print(f"Inizio simulazione transitoria da {start_time}s a {end_time}s con dt={time_step}s.")
+        print(f"Numero totale di equazioni MNA: {self.num_total_equations}")
+
+        for i, t in enumerate(times):
+            # Guess iniziale per fsolve (soluzione del passo precedente)
+            initial_guess = prev_solution.copy()
+
+            # Risolvi il sistema di equazioni non lineari per il passo attuale
+            try:
+                # Passa prev_solution e time a _system_equations
+                current_solution = fsolve(self._system_equations, initial_guess, args=(time_step, prev_solution, t))
+                
+                # Aggiorna lo stato dei componenti dinamici per il prossimo passo
+                self._update_dynamic_component_states(current_solution, prev_solution, time_step)
+                
+                prev_solution = current_solution
+                solution_history.append(current_solution)
+                
+                # print(f"Tempo: {t:.6f}s, Soluzione: {current_solution[self.circuit.node_map.get('output_final', 0)]:.4f}V")
+
+            except Exception as e:
+                print(f"Errore durante la risoluzione a t={t:.6f}s: {e}")
+                solution_history.append(np.full(self.num_total_equations, np.nan)) # Aggiungi NaN in caso di errore
+                break
         
-        # Inizializza gli stati dinamici con i valori DC (o 0)
-        # Per C, tensione iniziale è la tensione nodale.
-        # Per L, corrente iniziale è la corrente Vs_idx
-        for comp in self.circuit.components:
-            if isinstance(comp, Capacitor):
-                n1, n2 = comp.node_ids
-                self.dynamic_component_states[comp.name]['v_prev'] = self.prev_solution[n1] - self.prev_solution[n2]
-                self.dynamic_component_states[comp.name]['i_prev'] = 0.0 # Corrente iniziale non conosciuta direttamente
+        return np.array(times[:len(solution_history)]), np.array(solution_history)
+
+    def _update_dynamic_component_states(self, current_solution: np.ndarray, prev_solution: np.ndarray, dt: float):
+        """
+        Aggiorna lo stato interno dei componenti dinamici (C, L, SpeakerDriver, Cabinets).
+        """
+        for comp in self.dynamic_components:
+            node1_id, node2_id = comp.node_ids[0], comp.node_ids[1] # Assumi i primi due nodi per V e I
+
+            V_curr = current_solution[node1_id] - current_solution[node2_id]
+            V_prev = prev_solution[node1_id] - prev_solution[node2_id]
+
+            if isinstance(comp, (Capacitor, ClosedBoxCabinet, BassReflexCabinet)):
+                # Corrente attraverso il condensatore (trapezoidale)
+                I_curr = (2.0 * comp.capacitance / dt) * (V_curr - V_prev) - comp.i_prev
+                comp.update_state(V_curr, I_curr)
             elif isinstance(comp, Inductor):
-                n1, n2 = comp.node_ids
-                # La corrente dell'induttore in DC è la corrente attraverso il corto, difficile da estrarre
-                # Potresti aver bisogno di una variabile di corrente esplicita per l'induttore in MNA per questo
-                # Per semplicità qui, assumiamo 0 o un valore calcolato se L è un corto in DC.
-                self.dynamic_component_states[comp.name]['v_prev'] = 0.0
-                self.dynamic_component_states[comp.name]['i_prev'] = 0.0
+                # Corrente attraverso l'induttore (trapezoidale)
+                I_curr = comp.i_prev + (dt / (2.0 * comp.L)) * (V_curr + V_prev)
+                comp.update_state(V_curr, I_curr)
+            elif isinstance(comp, SpeakerDriver):
+                # Per SpeakerDriver, i nodi sono (elec_plus, elec_minus, mech_velocity_out)
+                # Le, L_mech, C_mech hanno i loro stati.
+                # Questa parte è più complessa e richiederebbe nodi interni espliciti per essere accurata.
+                # Per ora, aggiorniamo solo i parametri che sono stati esplicitamente modellati come dinamici nel get_stamps.
+                # Se i get_stamps di SpeakerDriver sono stati semplificati, l'update_state potrebbe essere vuoto o parziale.
+                pass # L'update_state di SpeakerDriver è più complesso e dipende dai suoi nodi interni.
 
+        # Aggiorna lo stato dei componenti funzionali (es. DelayLine)
+        # Questi non sono gestiti da MNA ma dalla pipeline.
+        # Se un DelayLine fosse direttamente nel circuito MNA (come sorgente V/I controllata)
+        # allora il suo update sarebbe qui.
+        # Per ora, DelayLine è gestito esternamente nel main.
+        # LDR è gestito come resistore dinamico, il suo stato è la resistenza attuale.
+        pass
 
-        for t_idx, current_time in enumerate(times):
-            print(f"Time step: {current_time:.6f}s")
-            
-            # Inizializza la guess per il passo temporale corrente con la soluzione precedente
-            current_solution_guess = np.copy(self.prev_solution)
-            
-            for iteration in range(max_iterations):
-                # Matrice Jacobiana totale e vettore residuo per Newton-Raphson
-                J_total = np.zeros((self.num_total_equations, self.num_total_equations))
-                residual_vector = np.zeros(self.num_total_equations)
-
-                # Contributi dei componenti al sistema
-                for component in self.circuit.components:
-                    # Contributi dei componenti lineari (Resistori)
-                    if isinstance(component, Resistor):
-                        n1, n2 = component.node_ids
-                        G = 1.0 / component.resistance
-                        if n1 != 0: J_total[n1, n1] += G
-                        if n2 != 0: J_total[n2, n2] += G
-                        if n1 != 0 and n2 != 0:
-                            J_total[n1, n2] -= G
-                            J_total[n2, n1] -= G
-                        
-                        # Contributo al residuo: G * (Vn1 - Vn2)
-                        if n1 != 0: residual_vector[n1] += G * (current_solution_guess[n1] - current_solution_guess[n2])
-                        if n2 != 0: residual_vector[n2] += G * (current_solution_guess[n2] - current_solution_guess[n1])
-
-                    # Contributi dei componenti dinamici (Capacitori, Induttori) - Metodo Trapezoidale
-                    elif isinstance(component, Capacitor):
-                        n1, n2 = component.node_ids
-                        C = component.capacitance
-                        v_C_prev = self.dynamic_component_states[component.name]['v_prev']
-                        i_C_prev = self.dynamic_component_states[component.name]['i_prev']
-
-                        # Conduttanza equivalente: G_eq = 2*C/dt
-                        G_eq = 2.0 * C / time_step
-                        # Corrente equivalente: i_eq = G_eq * V_C_prev + i_C_prev
-                        i_eq = G_eq * v_C_prev + i_C_prev
-
-                        if n1 != 0: J_total[n1, n1] += G_eq
-                        if n2 != 0: J_total[n2, n2] += G_eq
-                        if n1 != 0 and n2 != 0:
-                            J_total[n1, n2] -= G_eq
-                            J_total[n2, n1] -= G_eq
-                        
-                        # Aggiungi corrente equivalente al residuo (come sorgente)
-                        # Current for Trapezoidal: i_c = G_eq * V_c(curr) - i_eq
-                        # Residual at node 1: ... + i_c
-                        # Residual at node 2: ... - i_c
-                        residual_term_from_capacitor = G_eq * (current_solution_guess[n1] - current_solution_guess[n2]) - i_eq
-                        if n1 != 0: residual_vector[n1] += residual_term_from_capacitor
-                        if n2 != 0: residual_vector[n2] -= residual_term_from_capacitor
-
-                    elif isinstance(component, Inductor):
-                        n1, n2 = component.node_ids
-                        L = component.inductance
-                        v_L_prev = self.dynamic_component_states[component.name]['v_prev']
-                        i_L_prev = self.dynamic_component_states[component.name]['i_prev']
-
-                        # Conduttanza equivalente: G_eq = dt / (2*L)
-                        G_eq = time_step / (2.0 * L)
-                        # Tensione equivalente: v_eq = i_L_prev * (2*L/dt) + v_L_prev
-                        v_eq = i_L_prev * (2.0 * L / time_step) + v_L_prev
-
-                        if n1 != 0: J_total[n1, n1] += G_eq
-                        if n2 != 0: J_total[n2, n2] += G_eq
-                        if n1 != 0 and n2 != 0:
-                            J_total[n1, n2] -= G_eq
-                            J_total[n2, n1] -= G_eq
-
-                        # Corrente equivalente da aggiungere al residuo
-                        # i_L = G_eq * (V_curr) - G_eq * V_eq
-                        residual_term_from_inductor = G_eq * (current_solution_guess[n1] - current_solution_guess[n2]) - G_eq * v_eq
-                        if n1 != 0: residual_vector[n1] += residual_term_from_inductor
-                        if n2 != 0: residual_vector[n2] -= residual_term_from_inductor
-
-
-                    # Contributi delle sorgenti (indipendenti)
-                    elif isinstance(component, VoltageSource):
-                        n_plus, n_minus = component.node_ids
-                        vs_idx = component.current_index
-
-                        # Equazione KCL per la corrente Vs
-                        if n_plus != 0: J_total[n_plus, vs_idx] += 1
-                        if n_minus != 0: J_total[n_minus, vs_idx] -= 1
-                        
-                        # Equazione Vs: V_plus - V_minus - V_source = 0
-                        if n_plus != 0: J_total[vs_idx, n_plus] += 1
-                        if n_minus != 0: J_total[vs_idx, n_minus] -= 1
-
-                        # Residuo della sorgente di tensione
-                        residual_vector[vs_idx] += (current_solution_guess[n_plus] - current_solution_guess[n_minus]) - component.get_voltage(current_time)
-                    
-                    elif isinstance(component, CurrentSource):
-                        n_plus, n_minus = component.node_ids
-                        current_val = component.get_current(current_time)
-                        # Contributo al residuo (corrente in uscita dal nodo)
-                        if n_plus != 0: residual_vector[n_plus] += current_val
-                        if n_minus != 0: residual_vector[n_minus] -= current_val
-
-                    # Contributi dei componenti non lineari (Diodo)
-                    elif isinstance(component, Diode):
-                        anode_id, cathode_id = component.node_ids
-                        Vd = current_solution_guess[anode_id] - current_solution_guess[cathode_id]
-                        
-                        Id = component.calculate_current(Vd)
-                        Gd = component.calculate_conductance(Vd)
-
-                        # Aggiungi corrente del diodo al residuo
-                        if anode_id != 0: residual_vector[anode_id] += Id
-                        if cathode_id != 0: residual_vector[cathode_id] -= Id
-
-                        # Aggiungi conduttanza del diodo alla Jacobiana
-                        if anode_id != 0: J_total[anode_id, anode_id] += Gd
-                        if cathode_id != 0: J_total[cathode_id, cathode_id] += Gd
-                        if anode_id != 0 and cathode_id != 0:
-                            J_total[anode_id, cathode_id] -= Gd
-                            J_total[cathode_id, anode_id] -= Gd
-                    
-                    # Aggiungi qui la lo
