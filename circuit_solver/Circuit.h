@@ -12,8 +12,8 @@
 #include "components/VoltageSource.h" // Per identificare le sorgenti di tensione
 #include "components/Splitter.h"      // Per identificare gli splitter
 
-// Forward declaration per Subcircuit se decidi di usarlo in C++
-// class Subcircuit;
+// Forward declaration di Subcircuit (ora è una classe a sé stante)
+class Subcircuit; // Dichiarazione forward
 
 class Circuit {
 private:
@@ -25,7 +25,7 @@ private:
     std::vector<std::shared_ptr<Splitter>> splitters;           // Lista degli splitter
 
     // Se si usano sottocircuiti, potrebbero essere qui
-    // std::vector<std::shared_ptr<Subcircuit>> subcircuits;
+    // std::vector<std::shared_ptr<Subcircuit>> subcircuits; // Non direttamente, ma le loro istanze appiattite
 
 public:
     Circuit();
@@ -35,6 +35,14 @@ public:
 
     // Aggiunge un componente al circuito e assegna gli ID numerici ai suoi nodi.
     void addComponent(std::shared_ptr<Component> component);
+
+    // NUOVO METODO: Aggiunge un'istanza di un sottocircuito al circuito principale.
+    // subcircuit_def: La definizione del sottocircuito da istanziare.
+    // instance_connections: Una mappa che collega i nomi delle porte del sottocircuito
+    //                       ai nomi dei nodi reali nel circuito principale.
+    //                       Esempio: {"input_port": "node_A", "output_port": "node_B"}
+    void addSubcircuitInstance(const Subcircuit& subcircuit_def,
+                               const std::map<std::string, std::string>& instance_connections);
 
     // Metodi getter
     int getNumNodes() const { return nextNodeId; } // Il numero di nodi è il prossimo ID disponibile
@@ -49,17 +57,9 @@ public:
         if (it != nodes.end()) {
             return it->second;
         }
-        // Se il nodo non esiste, potresti voler aggiungere un errore o un default
         std::cerr << "Errore: Nodo '" << node_name << "' non trovato nel circuito." << std::endl;
         return -1; // O lancia un'eccezione
     }
-
-    // Metodo per connettere blocchi (se si implementano sottocircuiti in C++)
-    // Per ora, questo è un placeholder o una nota concettuale.
-    // La logica di connessione blocchi è complessa in C++ e spesso gestita a livello di MnaSolver
-    // o tramite un builder di circuito.
-    // void connectBlocks(std::shared_ptr<Subcircuit> source_block, std::shared_ptr<Subcircuit> dest_block,
-    //                    const std::vector<std::string>& source_output_names, const std::vector<std::string>& dest_input_names);
 };
 
 #endif // CIRCUIT_H
