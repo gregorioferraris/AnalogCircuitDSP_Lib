@@ -1093,4 +1093,3 @@ set_target_properties()" + sanitizedPluginName + R"( PROPERTIES
 )";
     _createFile(projectDir / "CMakeLists.txt", cmakeContent);
 }
-
