@@ -1,0 +1,95 @@
+import numpy as np
+
+def simulate_vintage_adc_dac(
+    analog_input_signal: np.ndarray, # Segnale analogico dall'uscita dello stadio di ingresso MNA
+    sampling_rate: float,            # Frequenza di campionamento (es. 26040 per MPC60)
+    bit_depth: int,                  # Profondità di bit (es. 12 per MPC60/SP1200)
+    max_voltage: float,              # Tensione massima di riferimento (per la quantizzazione)
+    min_voltage: float,              # Tensione minima di riferimento
+    original_time_step: float        # Passo di tempo della simulazione MNA originale
+) -> np.ndarray:
+    """
+    Simula la conversione A/D e D/A di un convertitore vintage (downsampling e quantizzazione).
+
+    Args:
+        analog_input_signal (np.ndarray): Array NumPy del segnale analogico in ingresso (tensione).
+        sampling_rate (float): Frequenza di campionamento del convertitore vintage (Hz).
+        bit_depth (int): Profondità di bit del convertitore (es. 8, 12, 16).
+        max_voltage (float): La tensione massima che l'ADC può rappresentare.
+        min_voltage (float): La tensione minima che l'ADC può rappresentare.
+        original_time_step (float): Il passo di tempo (dt) usato nella simulazione MNA originale.
+
+    Returns:
+        np.ndarray: Il segnale "digitalizzato" e riconvertito in analogico.
+                    Questo segnale avrà un numero di campioni ridotto e sarà quantizzato.
+    """
+    if sampling_rate <= 0 or bit_depth <= 0 or max_voltage <= min_voltage:
+        raise ValueError("Parametri di campionamento e quantizzazione non validi.")
+
+    # 1. Downsampling (simula il campionamento)
+    # Calcola il passo di tempo del campionatore vintage
+    sampling_period = 1.0 / sampling_rate
+    
+    # Quanti passi MNA corrispondono a un periodo di campionamento
+    samples_per_mna_step = int(np.round(sampling_period / original_time_step))
+    if samples_per_mna_step < 1:
+        print(f"Attenzione: Frequenza di campionamento ({sampling_rate} Hz) troppo alta per il passo temporale MNA ({original_time_step} s).")
+        # Se la frequenza di campionamento è troppo alta rispetto al dt, potremmo campionare ogni passo MNA
+        # o interpolare, ma per "vintage" di solito è il contrario.
+        samples_per_mna_step = 1
+
+    # Estrai i campioni al ritmo del campionatore vintage
+    # Usiamo interpolazione lineare per ottenere il valore preciso all'istante di campionamento
+    original_times = np.arange(len(analog_input_signal)) * original_time_step
+    
+    downsampled_times = np.arange(0, original_times[-1], sampling_period)
+    
+    # Gestisci il caso in cui downsampled_times possa essere vuoto
+    if len(downsampled_times) == 0 and len(analog_input_signal) > 0:
+        downsampled_times = np.array([original_times[0]]) if len(original_times) > 0 else np.array([])
+        
+    downsampled_signal = np.interp(downsampled_times, original_times, analog_input_signal)
+    
+    # 2. Quantizzazione
+    # Calcola il numero totale di livelli di quantizzazione
+    num_levels = 2**bit_depth
+    
+    # Range di tensione dell'ADC
+    voltage_range = max_voltage - min_voltage
+    
+    # Dimensione di un passo di quantizzazione (LSB - Least Significant Bit)
+    quantization_step = voltage_range / (num_levels - 1) # Meno 1 per includere max_voltage
+
+    # Sposta il segnale in un range positivo per la quantizzazione, se necessario
+    shifted_signal = downsampled_signal - min_voltage
+
+    # Quantizza i campioni
+    quantized_signal = np.round(shifted_signal / quantization_step) * quantization_step
+
+    # Riporta il segnale al suo range originale
+    quantized_signal += min_voltage
+    
+    # Assicurati che i valori quantizzati non superino il range max/min_voltage
+    quantized_signal = np.clip(quantized_signal, min_voltage, max_voltage)
+
+    # 3. Ricostruzione (Holding)
+    # Poiché l'ADC e il DAC sono discrete, il DAC tipicamente "tiene" il valore
+    # fino al prossimo campione. Per re-iniettare questo nel simulatore MNA,
+    # dobbiamo estendere i campioni quantizzati per tornare alla granularità originale del MNA.
+    reconstructed_signal = np.zeros_like(analog_input_signal)
+    
+    # Mappa gli indici del segnale campionata con gli indici del segnale originale
+    current_downsampled_idx = 0
+    for i in range(len(original_times)):
+        if current_downsampled_idx < len(downsampled_times) -1 and \
+           original_times[i] >= downsampled_times[current_downsampled_idx + 1]:
+            current_downsampled_idx += 1
+        
+        if current_downsampled_idx < len(downsampled_signal):
+             reconstructed_signal[i] = quantized_signal[current_downsampled_idx]
+        else:
+             # Se siamo oltre l'ultimo campione quantizzato, manteniamo l'ultimo valore o 0
+             reconstructed_signal[i] = quantized_signal[-1] if len(quantized_signal) > 0 else 0.0
+
+    return reconstructed_signal
+
