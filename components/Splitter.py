@@ -1,68 +1,76 @@
+# components/component.py
+
 import numpy as np
-from components.component import Component
 
-class Splitter(Component):
-    def __init__(self, name: str, input_node: str, *output_nodes: str):
+class Component:
+    """
+    Classe base per tutti i componenti del circuito.
+    Definisce l'interfaccia comune per la gestione dei nodi e l'identificazione.
+    Include la logica per l'applicazione delle tolleranze di produzione.
+    """
+    def __init__(self, name: str, *node_names_str: str):
         """
-        Inizializza un componente Splitter di segnale.
-        Prende un segnale da un nodo di ingresso e lo replica su più nodi di uscita.
-        Questo modello impone che le tensioni di tutti i nodi di uscita siano uguali
-        alla tensione del nodo di ingresso.
+        Inizializza un componente.
         Args:
-            name (str): Nome univoco dell'istanza (es. "SPLITTER1").
-            input_node (str): Nome del nodo di ingresso.
-            *output_nodes (str): Nomi dei nodi di uscita (uno o più).
+            name (str): Nome univoco dell'istanza del componente (es. "R1", "C_bypass").
+            *node_names_str (str): Nomi dei nodi a cui il componente è connesso (stringhe, es. "input", "output").
         """
-        # I nodi del componente saranno (input_node, output_node_1, output_node_2, ...)
-        super().__init__(name, input_node, *output_nodes)
-        self.pin_names = ('input',) + tuple(f'output_{i+1}' for i in range(len(output_nodes)))
-        
-        self.input_node_name = input_node
-        self.output_node_names = output_nodes
-        self.num_outputs = len(output_nodes)
+        self.name = name
+        self.node_names_str = node_names_str # Nomi dei nodi come stringhe (es. ('input', 'output'))
+        self.node_ids = None # Verrà popolato dalla classe Circuit con gli ID numerici dei nodi
+        self.component_id = None # Verrà assegnato dalla classe Circuit
 
-        # Indici per le correnti ausiliarie aggiunte al sistema MNA
-        # Ogni output_node avrà una sua corrente ausiliaria per imporre la relazione di tensione
-        self.output_current_indices = [-1] * self.num_outputs
+    def _set_node_ids(self, ids):
+        """
+        Metodo interno chiamato dalla classe Circuit per impostare gli ID numerici dei nodi.
+        'ids' può essere una tupla (ID_NODO1, ID_NODO2, ...) o un dizionario {'nome_pin': ID_NODO}.
+        """
+        self.node_ids = ids
+
+    def _set_component_id(self, comp_id):
+        """Metodo interno chiamato dalla classe Circuit per assegnare un ID univoco al componente."""
+        self.component_id = comp_id
+
+    def _apply_tolerance(self, nominal_value: float, tolerance_percent: float, distribution: str = 'uniform') -> float:
+        """
+        Applica una tolleranza percentuale al valore nominale.
+        Args:
+            nominal_value (float): Il valore nominale del parametro.
+            tolerance_percent (float): La tolleranza in percentuale (es. 5.0 per +/- 5%).
+            distribution (str): Tipo di distribuzione ('uniform' o 'normal').
+        Returns:
+            float: Il valore del parametro con la tolleranza applicata.
+        """
+        if tolerance_percent == 0:
+            return nominal_value
+        
+        if distribution == 'uniform':
+            # Genera un fattore casuale tra -tolerance_percent e +tolerance_percent
+            variation_factor = (2 * np.random.rand() - 1) * (tolerance_percent / 100.0)
+            return nominal_value * (1 + variation_factor)
+        elif distribution == 'normal':
+            # Assumiamo che la tolleranza percentuale rappresenti 3 deviazioni standard (3-sigma)
+            # Questo copre circa il 99.7% dei valori
+            std_dev = nominal_value * (tolerance_percent / (3 * 100.0))
+            return np.random.normal(nominal_value, std_dev)
+        else:
+            raise ValueError("Tipo di distribuzione non supportato. Usare 'uniform' o 'normal'.")
 
     def get_stamps(self, num_total_equations: int, dt: float, current_solution_guess: np.ndarray, prev_solution: np.ndarray, time: float):
         """
-        Restituisce i contributi dello Splitter alla matrice MNA (stamp_A) e al vettore RHS (stamp_B).
-        Ogni nodo di uscita aggiunge una riga e una colonna extra al sistema MNA
-        per imporre la relazione V_output = V_input.
+        Metodo astratto per ottenere i "contributi" del componente alla matrice MNA e al vettore RHS.
+        Deve essere implementato dalle sottoclassi.
+        Args:
+            num_total_equations (int): Dimensione totale del sistema di equazioni.
+            dt (float): Passo temporale (1/Fs).
+            current_solution_guess (np.ndarray): Guess corrente per le incognite (tensioni ai nodi, correnti sorgenti V).
+            prev_solution (np.ndarray): Soluzione del passo temporale precedente.
+            time (float): Tempo attuale della simulazione.
+        Returns:
+            tuple: (stamp_A, stamp_B) - Matrice e vettore dei contributi del componente.
         """
-        stamp_A = np.zeros((num_total_equations, num_total_equations))
-        stamp_B = np.zeros(num_total_equations)
+        raise NotImplementedError("Il metodo get_stamps deve essere implementato dalle sottoclassi.")
 
-        # Recupera gli ID dei nodi
-        # node_ids è una tupla: (input_id, output_1_id, output_2_id, ...)
-        input_id = self.node_ids[0]
-        output_ids = self.node_ids[1:] # Tutti gli ID dei nodi di uscita
-
-        # Per ogni nodo di uscita, aggiungiamo un'equazione ausiliaria
-        for i, output_id in enumerate(output_ids):
-            aux_current_idx = self.output_current_indices[i] # Indice della corrente ausiliaria per questo output
-
-            # --- Equazioni KCL (correnti ausiliarie) ---
-            # La corrente ausiliaria entra nel nodo di uscita ed esce dal nodo di ingresso
-            # (o viceversa, la convenzione qui è che impone V_out - V_in = 0)
-            
-            # Contributo della corrente ausiliaria ai nodi di uscita e ingresso
-            # Questa corrente è la "corrente" che impone il cortocircuito concettuale
-            if output_id != 0: stamp_A[output_id, aux_current_idx] += 1
-            if input_id != 0: stamp_A[input_id, aux_current_idx] -= 1 # La corrente "esce" dall'input per imporre l'uguaglianza
-
-            # --- Equazione ausiliaria: V_output - V_input = 0 ---
-            # Questa equazione viene aggiunta alla riga MNA corrispondente a aux_current_idx
-            if output_id != 0: stamp_A[aux_current_idx, output_id] += 1
-            if input_id != 0: stamp_A[aux_current_idx, input_id] -= 1
-            stamp_B[aux_current_idx] = 0.0 # Il lato destro è zero per V_output = V_input
-
-        return stamp_A, stamp_B
-
-    def _set_output_current_indices(self, indices: list[int]):
-        """Metodo interno chiamato dal solutore per assegnare gli indici delle correnti ausiliarie di uscita."""
-        if len(indices) != self.num_outputs:
-            raise ValueError(f"Numero di indici forniti ({len(indices)}) non corrisponde al numero di uscite ({self.num_outputs}).")
-        self.output_current_indices = indices
+    def __str__(self):
+        return f"{self.__class__.__name__}(Name: '{self.name}', Nodes: {self.node_names_str})"
 
