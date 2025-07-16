@@ -1,99 +1,226 @@
-// components/Splitter.cpp
-#include "Splitter.h"
-#include <iostream> // For warning messages (though none are currently used in this implementation)
+// components/MOSFET.cpp
+#include "MOSFET.h"
+#include <iostream> // Per i messaggi di errore e output di debug
+#include <algorithm> // Per std::max, std::min
+#include <cmath>     // Per std::sqrt, std::abs
 
-/**
- * @brief Constructor for the Splitter component.
- *
- * Initializes the splitter with its name and connected nodes.
- * It represents a conceptual "splitter" or a very low-resistance connection,
- * effectively acting as a near-ideal short circuit. The internal resistance
- * is fixed at R_SPLIT.
- *
- * @param name The unique name of the splitter.
- * @param node1 The name of the first connected node.
- * @param node2 The name of the second connected node.
- * @param tolerance_percent Optional tolerance percentage for component value.
- */
-Splitter::Splitter(const std::string& name, const std::string& node1, const std::string& node2,
-                   double tolerance_percent)
-    : Component(name, node1, node2, tolerance_percent) // Call base class constructor
+// Definisci un piccolo epsilon per la stabilità numerica, specialmente per le derivate vicino ai bordi
+const double EPSILON = 1e-9; // Piccola differenza di tensione per la stabilità numerica
+
+// Costruttore per il componente MOSFET.
+MOSFET::MOSFET(const std::string& name,
+               const std::vector<std::string>& node_names_str, // Ora accetta vector di stringhe
+               Type type,
+               double Kp, double Vt)
+    : Component(name, node_names_str), // Chiama il costruttore della classe base con i nomi dei nodi
+      type(type), Kp_(Kp), Vt_(Vt)
 {
-    // R_SPLIT is a const member, so it's initialized directly in the class definition.
-    // No specific initialization needed here beyond the base class.
-    // A warning could be added here if there were specific conditions for the splitter.
+    // I node_ids_ saranno assegnati dal Circuit.
+    // Assumiamo che node_names_str contenga [drain_node, gate_node, source_node, bulk_node]
+    // nell'ordine specificato nel costruttore di Component.
+
+    // Validazione di base per i parametri
+    if (Kp_ <= 0) {
+        std::cerr << "Warning: MOSFET " << name << " ha un parametro Kp non positivo. Impostato a 1e-5 A/V^2." << std::endl;
+        Kp_ = 1e-5; // Valore di default
+    }
+
+    std::cout << "MOSFET " << name << " inizializzato (Tipo: " << (type == N_CHANNEL ? "NMOS" : "PMOS")
+              << ", Kp=" << Kp_ << ", Vt=" << Vt_ << "V)." << std::endl;
 }
 
-/**
- * @brief Applies the stamps of the splitter to the MNA matrix (A) and vector (b).
- *
- * This method treats the splitter as a resistor with a very small, fixed resistance
- * (R_SPLIT) to simulate a near-ideal short circuit. The stamps are applied based
- * on the conductance (G = 1/R_SPLIT).
- *
- * @param A The MNA matrix to which stamps are applied.
- * @param b The MNA right-hand side vector to which stamps are applied.
- * @param x_current_guess The current guess for node voltages and branch currents (not used for this static component).
- * @param prev_solution The solution from the previous time step (not used for this static component).
- * @param time The current simulation time (not used for this static component).
- * @param dt The time step size (not used for this static component).
- */
-void Splitter::getStamps(
-    Eigen::MatrixXd& A, Eigen::VectorXd& b,
-    const Eigen::VectorXd& x_current_guess, const Eigen::VectorXd& prev_solution,
-    double time, double dt
+// Calcola la tensione di soglia (Vth) senza considerare l'effetto corpo (per semplicità Level 1)
+// Il tuo file originale MOSFET.cpp aveva l'effetto corpo. Per allineare con la semplificazione
+// del tuo MnaSolver.cpp che non usa Vbs, lo rimuovo qui per ora.
+// Se vuoi l'effetto corpo, dovrai assicurarti che Vbs sia passato correttamente e che
+// MnaSolver.cpp lo utilizzi per calcolare Vth.
+double MOSFET::calculateThresholdVoltage(double Vsb) const {
+    // Per SPICE Level 1 semplificato senza effetto corpo, Vth è semplicemente Vt0
+    // Se vuoi l'effetto corpo, ripristina la logica dal tuo file originale.
+    // double phi = 0.6; // Esempio di phi, dovrebbe essere un parametro del modello
+    // double gamma = 0.0; // Esempio di gamma, dovrebbe essere un parametro del modello
+    // if (type == N_CHANNEL) {
+    //     double Vsb_clamped = std::max(0.0, Vsb);
+    //     return Vt_ + gamma * (std::sqrt(2 * phi + Vsb_clamped) - std::sqrt(2 * phi));
+    // } else { // P_CHANNEL
+    //     double Vbs_abs = std::abs(Vsb);
+    //     double Vbs_clamped = std::max(0.0, Vbs_abs);
+    //     return Vt_ - gamma * (std::sqrt(2 * phi + Vbs_clamped) - std::sqrt(2 * phi));
+    // }
+    return Vt_;
+}
+
+// Calcola la corrente di drain (Id) basata sulla regione operativa (SPICE Level 1).
+double MOSFET::calculateDrainCurrent(double Vgs, double Vds, double Vth) const {
+    double id = 0.0;
+    double Vov = Vgs - Vth; // Tensione di overdrive
+
+    if (type == N_CHANNEL) {
+        if (Vgs <= Vth + EPSILON) { // Regione di cutoff
+            id = 0.0;
+        } else if (Vds < Vov - EPSILON) { // Regione di triodo (lineare)
+            id = Kp_ * (Vov * Vds - 0.5 * Vds * Vds); // Senza lambda per semplicità Level 1
+        } else { // Regione di saturazione (Vds >= Vov)
+            id = 0.5 * Kp_ * Vov * Vov; // Senza lambda per semplicità Level 1
+        }
+    } else { // P_CHANNEL
+        // Per PMOS, le tensioni sono tipicamente negative.
+        // Convertiamo in valori assoluti per usare le stesse equazioni, poi invertiamo la corrente.
+        double abs_Vgs = std::abs(Vgs);
+        double abs_Vds = std::abs(Vds);
+        double abs_Vth = std::abs(Vth); // Vth è negativo per PMOS
+
+        if (Vgs >= Vth - EPSILON) { // Regione di cutoff (Vgs meno negativo di Vth)
+            id = 0.0;
+        } else if (Vds > Vov + EPSILON) { // Regione di triodo (Vds meno negativo di Vds_sat)
+            id = Kp_ * (Vov * Vds - 0.5 * Vds * Vds);
+        } else { // Regione di saturazione (Vds <= Vov)
+            id = 0.5 * Kp_ * Vov * Vov;
+        }
+        id = -id; // La corrente fluisce da Source a Drain per PMOS, quindi invertiamo il segno
+    }
+    return id;
+}
+
+// Calcola la conduttanza di uscita (gds = d(Id)/d(Vds)).
+double MOSFET::calculateGDS(double Vgs, double Vds, double Vth) const {
+    double gds = 0.0;
+    double Vov = Vgs - Vth;
+
+    if (type == N_CHANNEL) {
+        if (Vgs <= Vth + EPSILON) { // Cutoff
+            gds = 0.0;
+        } else if (Vds < Vov - EPSILON) { // Triodo
+            gds = Kp_ * (Vov - Vds);
+        } else { // Saturation
+            gds = 0.0; // Per Level 1 senza lambda
+        }
+    } else { // P_CHANNEL
+        if (Vgs >= Vth - EPSILON) { // Cutoff
+            gds = 0.0;
+        } else if (Vds > Vov + EPSILON) { // Triodo
+            gds = -Kp_ * (Vov - Vds); // Invertito per PMOS
+        } else { // Saturation
+            gds = 0.0; // Per Level 1 senza lambda
+        }
+    }
+    return gds;
+}
+
+// Calcola la transconduttanza (gm = d(Id)/d(Vgs)).
+double MOSFET::calculateGM(double Vgs, double Vds, double Vth) const {
+    double gm = 0.0;
+    double Vov = Vgs - Vth;
+
+    if (type == N_CHANNEL) {
+        if (Vgs <= Vth + EPSILON) { // Cutoff
+            gm = 0.0;
+        } else if (Vds < Vov - EPSILON) { // Triodo
+            gm = Kp_ * Vds;
+        } else { // Saturation
+            gm = Kp_ * Vov;
+        }
+    } else { // PMOS
+        if (Vgs >= Vth - EPSILON) { // Cutoff
+            gm = 0.0;
+        } else if (Vds > Vov + EPSILON) { // Triodo
+            gm = -Kp_ * Vds; // Invertito per PMOS
+        } else { // Saturation
+            gm = -Kp_ * Vov; // Invertito per PMOS
+        }
+    }
+    return gm;
+}
+
+// Calcola la transconduttanza di bulk (gmb = d(Id)/d(Vbs)).
+// Per semplicità, in questo modello Level 1 senza effetto corpo, gmb è 0.
+double MOSFET::calculateGMB(double Vgs, double Vds, double Vbs, double Vth) const {
+    return 0.0; // Implementazione semplificata senza effetto corpo
+}
+
+// Applica gli "stamps" del modello MOSFET alla matrice MNA (A) e al vettore (B).
+void MOSFET::getStamps(
+    int num_total_equations, double dt,
+    const std::vector<double>& x,
+    const std::vector<double>& prev_solution,
+    double time,
+    std::vector<std::vector<double>>& A,
+    std::vector<double>& B
 ) {
-    // Get the global indices for the two connected nodes.
-    // getNodeIndex is assumed to be a method of the base Component class
-    // that correctly maps node names to their corresponding indices in the MNA matrix.
-    int idx1 = getNodeIndex(node1);
-    int idx2 = getNodeIndex(node2);
+    // Ottieni gli indici globali per i nodi del MOSFET.
+    // Assumiamo che node_ids_ contenga [idx_D, idx_G, idx_S, idx_B]
+    // nell'ordine: Drain (0), Gate (1), Source (2), Bulk (3)
+    int idx_D = node_ids_[0];
+    int idx_G = node_ids_[1];
+    int idx_S = node_ids_[2];
+    int idx_B = node_ids_[3];
 
-    // Calculate the conductance of the splitter.
-    // Since R_SPLIT is very small (e.g., 1e-9 Ohm), G_SPLIT will be very large (e.g., 1e9 Siemens).
-    double G_SPLIT = 1.0 / R_SPLIT;
+    // Ottieni le tensioni correnti dei nodi dal vettore `x`
+    // Il nodo 0 è il ground, quindi la sua tensione è 0.0
+    double V_D_curr = (idx_D == 0) ? 0.0 : x[idx_D];
+    double V_G_curr = (idx_G == 0) ? 0.0 : x[idx_G];
+    double V_S_curr = (idx_S == 0) ? 0.0 : x[idx_S];
+    double V_B_curr = (idx_B == 0) ? 0.0 : x[idx_B];
 
-    // Apply the stamps to the MNA matrix A.
-    // For a conductance G between node1 and node2, the stamps are:
-    // A(idx1, idx1) += G
-    // A(idx2, idx2) += G
-    // A(idx1, idx2) -= G
-    // A(idx2, idx1) -= G
+    // Calcola le tensioni terminali
+    double Vgs_curr = V_G_curr - V_S_curr;
+    double Vds_curr = V_D_curr - V_S_curr;
+    double Vbs_curr = V_B_curr - V_S_curr;
+    double Vsb_curr = V_S_curr - V_B_curr; // Source-Bulk voltage per il calcolo di Vth (se usato)
 
-    // Ensure node indices are valid before stamping (e.g., not -1 if a node is undefined).
-    // This check helps prevent out-of-bounds access if node names are not found.
-    if (idx1 != -1) {
-        A(idx1, idx1) += G_SPLIT;
-    }
-    if (idx2 != -1) {
-        A(idx2, idx2) += G_SPLIT;
-    }
-    // Apply cross-stamps only if both nodes are valid and distinct.
-    // If idx1 == idx2, it means the component is connected to the same node twice,
-    // which is usually an error or a degenerate case.
-    if (idx1 != -1 && idx2 != -1 && idx1 != idx2) {
-        A(idx1, idx2) -= G_SPLIT;
-        A(idx2, idx1) -= G_SPLIT;
-    }
+    // Calcola la tensione di soglia (Vth)
+    double Vth_curr = calculateThresholdVoltage(Vsb_curr);
 
-    // For a passive, linear component like a resistor (or a very low resistance),
-    // there are no contributions to the right-hand side vector 'b' from the component itself,
-    // unless there's an independent source associated with it (which is not the case here).
-    // Therefore, 'b' remains unchanged by the splitter's stamps.
+    // Calcola la corrente di drain e le conduttanze a piccolo segnale
+    double Id_curr = calculateDrainCurrent(Vgs_curr, Vds_curr, Vth_curr);
+    double gds_val = calculateGDS(Vgs_curr, Vds_curr, Vth_curr);
+    double gm_val = calculateGM(Vgs_curr, Vds_curr, Vth_curr);
+    double gmb_val = calculateGMB(Vgs_curr, Vds_curr, Vbs_curr, Vth_curr); // Sarà 0.0 nel modello semplificato
+
+    // Applica gli stamps alla matrice MNA A e al vettore B
+    // Il modello del compagno per una sorgente di corrente non lineare I_D(V_GS, V_DS, V_BS) è:
+    // I_D = I_D(V_0) + gm * (V_GS - V_GS0) + gds * (V_DS - V_DS0) + gmb * (V_BS - V_BS0)
+    // Riorganizzando per MNA:
+    // I_D - gm * V_GS - gds * V_DS - gmb * V_BS = I_D(V_0) - gm * V_GS0 - gds * V_DS0 - gmb * V_BS0
+    // Il lato destro è la sorgente di corrente equivalente I_eq.
+
+    // Contributi alla matrice A (conduttanze)
+    // KCL al nodo Drain (idx_D)
+    A[idx_D][idx_D] += gds_val;
+    A[idx_D][idx_G] += gm_val;
+    A[idx_D][idx_B] += gmb_val;
+    A[idx_D][idx_S] -= (gds_val + gm_val + gmb_val);
+
+    // KCL al nodo Source (idx_S)
+    A[idx_S][idx_D] -= gds_val;
+    A[idx_S][idx_G] -= gm_val;
+    A[idx_S][idx_B] -= gmb_val;
+    A[idx_S][idx_S] += (gds_val + gm_val + gmb_val);
+
+    // Calcola la sorgente di corrente equivalente per il vettore RHS B
+    double I_eq = Id_curr - gds_val * Vds_curr - gm_val * Vgs_curr - gmb_val * Vbs_curr;
+
+    // Aggiungi I_eq al RHS dell'equazione KCL del Drain
+    // La corrente Id_curr è la corrente che *esce* dal Drain per NMOS, o *entra* per PMOS.
+    // Quindi, se Id_curr è la corrente che fluisce da D a S (NMOS), la sottraiamo dal nodo D.
+    // Se Id_curr è la corrente che fluisce da S a D (PMOS), la aggiungiamo al nodo D.
+    // Poiché calculateDrainCurrent() restituisce un valore positivo per NMOS (D->S)
+    // e un valore negativo per PMOS (S->D), possiamo semplicemente sottrarre I_eq dal Drain
+    // e aggiungerlo al Source.
+    B[idx_D] -= I_eq; // Corrente esce dal Drain
+    B[idx_S] += I_eq; // Corrente entra nel Source
+
+    // Nota: I nodi Gate e Bulk sono tipicamente ad alta impedenza (nessun contributo di corrente)
+    // a meno che non siano modellati la corrente di gate o i diodi di giunzione,
+    // che non fanno parte del modello Level 1 di base.
 }
 
-/**
- * @brief Updates the internal state of the splitter.
- *
- * As the splitter is modeled as a static, near-ideal connection (its behavior
- * depends only on the instantaneous voltages across it, not on past states),
- * this method does not perform any state updates. It is provided to satisfy
- * the Component base class interface, ensuring all virtual methods are implemented.
- *
- * @param v_curr The current voltage across the component (not used).
- * @param i_curr The current flowing through the component (not used).
- */
-void Splitter::updateState(double v_curr, double i_curr) {
-    // No internal state to update for this splitter model.
-    // This method is intentionally left empty.
+// updateState non è necessario per il MOSFET nel modello Level 1,
+// poiché non ha variabili di stato interne che cambiano nel tempo
+// in base alla soluzione precedente (come condensatori/induttori).
+// Il suo comportamento è puramente non lineare e dipende dalle tensioni attuali.
+void MOSFET::updateState(const std::vector<double>& current_solution,
+                         const std::vector<double>& prev_solution,
+                         double dt) {
+    // Non fa nulla per il MOSFET Level 1, in quanto non ha stato interno dinamico.
 }
