@@ -4,80 +4,85 @@
 
 #include <string>
 #include <vector>
-#include <numeric>   // Per std::iota (non usato direttamente qui, ma comune per ID)
-#include <cmath>     // Per std::pow, std::log10, std::exp, std::tanh
-#include <random>    // Per std::mt19937, std::uniform_real_distribution, std::normal_distribution
-#include <stdexcept> // Per std::invalid_argument
+#include <map>
+#include <memory> // For std::shared_ptr
+#include <Eigen/Dense> // Include Eigen for matrix/vector types in method signatures
 
 class Component {
-protected:
-    std::string name;
-    std::vector<std::string> nodeNamesStr; // Nomi dei nodi come stringhe (es. "input", "output")
-    std::vector<int> nodeIds;             // ID numerici dei nodi assegnati dal Circuit
-    int componentId;                      // ID univoco del componente
-
-    // Generatore di numeri casuali statico per le tolleranze
-    static std::mt19937 rng;
-
 public:
-    // Costruttore variadico per accettare un numero variabile di nomi di nodi
-    template<typename... Args>
-    Component(const std::string& name, Args... node_names_str)
-        : name(name), componentId(-1) { // -1 indica non ancora assegnato
-        (nodeNamesStr.push_back(node_names_str), ...);
-    }
-
-    // Distruttore virtuale per polimorfismo
+    // Costruttore: accetta il nome del componente e una lista di nomi di nodi come stringhe
+    Component(const std::string& name, const std::vector<std::string>& nodeNames);
+    
+    // Distruttore virtuale per consentire la corretta deallocazione delle classi derivate
     virtual ~Component() = default;
 
     // Metodo virtuale puro per clonare il componente (necessario per i sottocircuiti)
     // Ogni classe derivata dovrà implementare questo metodo.
     virtual Component* clone() const = 0;
 
-    // Metodi per impostare gli ID (chiamati da Circuit)
-    void setNodeIds(const std::vector<int>& ids) {
-        nodeIds = ids;
-    }
+    // Metodi per impostare gli ID numerici dei nodi (chiamato da Circuit)
+    // Per componenti con nodi ordinati (es. Resistor, Capacitor)
+    void setNodeIds(const std::vector<int>& ids);
+    // Per componenti con nodi nominati (es. Triode, MOSFET)
+    void setNodeIds(const std::map<std::string, int>& ids);
 
-    void setComponentId(int id) {
-        componentId = id;
-    }
-
-    // Metodi getter
-    const std::string& getName() const { return name; }
-    const std::vector<std::string>& getNodeNamesStr() const { return nodeNamesStr; }
-    const std::vector<int>& getNodeIds() const { return nodeIds; }
-    int getComponentId() const { return componentId; }
-
-    // Metodo per applicare le tolleranze di produzione
-    // Utilizza un generatore di numeri casuali statico
-    double applyTolerance(double nominal_value, double tolerance_percent, const std::string& distribution = "uniform") {
-        if (tolerance_percent == 0.0) {
-            return nominal_value;
-        }
-
-        if (distribution == "uniform") {
-            std::uniform_real_distribution<double> dist(-tolerance_percent / 100.0, tolerance_percent / 100.0);
-            double variation_factor = dist(rng);
-            return nominal_value * (1.0 + variation_factor);
-        } else if (distribution == "normal") {
-            // Assumiamo che la tolleranza percentuale rappresenti 3 deviazioni standard (3-sigma)
-            double std_dev = nominal_value * (tolerance_percent / (3.0 * 100.0));
-            std::normal_distribution<double> dist(nominal_value, std_dev);
-            return dist(rng);
-        } else {
-            throw std::invalid_argument("Tipo di distribuzione non supportato. Usare 'uniform' o 'normal'.");
-        }
-    }
+    // Metodo per impostare l'ID univoco del componente (chiamato da Circuit)
+    void setComponentId(int id);
 
     // Metodo virtuale puro per ottenere i "contributi" del componente alla matrice MNA e al vettore RHS.
     // Deve essere implementato dalle sottoclassi.
-    // current_solution_guess e prev_solution sono vettori di tensioni ai nodi e correnti ausiliarie.
-    virtual void getStamps(int num_total_equations, double dt, const std::vector<double>& current_solution_guess, const std::vector<double>& prev_solution, double time,
-                           std::vector<std::vector<double>>& A, std::vector<double>& B) = 0;
-};
+    // 'x_current_guess' e 'prev_solution' sono le soluzioni del solutore.
+    // 'time' è il tempo attuale della simulazione. 'dt' è il passo temporale.
+    virtual void getStamps(
+        Eigen::MatrixXd& A, Eigen::VectorXd& b,
+        const Eigen::VectorXd& x_current_guess, const Eigen::VectorXd& prev_solution,
+        double time, double dt
+    ) = 0;
 
-// L'inizializzazione del generatore di numeri casuali statico (Component::rng)
-// deve avvenire in un singolo file .cpp, tipicamente in Component.cpp.
+    // Metodo virtuale per calcolare la corrente non lineare (usato da MnaSolver::_system_equations)
+    // Questo metodo sarà implementato solo dai componenti non lineari.
+    // I parametri dipendono dal tipo di componente (es. Vd per diodo, Vgs/Vds per MOSFET).
+    virtual double calculateNonlinearCurrent(double param1, double param2) const {
+        // Implementazione di default per componenti lineari o non applicabili
+        return 0.0;
+    }
+    
+    // Metodo virtuale per l'aggiornamento dello stato (per C, L, ecc.)
+    virtual void updateState(double v_curr, double i_curr) {}
+
+    // Metodo virtuale per ottenere il valore di una sorgente (per VoltageSource, CurrentSource)
+    virtual double getValue(double time) const { return 0.0; }
+    // Metodo virtuale per impostare il valore di una sorgente (per DelayLine che controlla Vs, o per input audio)
+    virtual void setValue(double value) {}
+
+    // Metodo virtuale per l'aggiornamento dei componenti funzionali (es. DelayLine)
+    virtual double update(double input_sample) { return input_sample; }
+    virtual void reset() {} // Per resettare lo stato di componenti funzionali
+
+    // Getters
+    const std::string& getName() const { return name; }
+    const std::vector<std::string>& getNodeNamesStr() const { return nodeNamesStr; }
+    int getComponentId() const { return componentId; }
+
+    // Metodi per identificare il tipo di nodo ID
+    bool hasNamedNodes() const { return !nodeIdsMap.empty(); }
+    const std::vector<int>& getNodeIdsVector() const { return nodeIdsVector; }
+    const std::map<std::string, int>& getNodeIdsMap() const { return nodeIdsMap; }
+
+protected:
+    std::string name;
+    std::vector<std::string> nodeNamesStr; // Nomi dei nodi come stringhe (es. {"input", "output"})
+    int componentId;
+
+    // Gli ID dei nodi possono essere memorizzati come vettore (per nodi ordinati)
+    // o come mappa (per nodi nominati come 'drain', 'gate', 'source').
+    // Useremo uno dei due, non entrambi contemporaneamente, a seconda del tipo di componente.
+    std::vector<int> nodeIdsVector;
+    std::map<std::string, int> nodeIdsMap;
+
+    // Indice per la corrente delle sorgenti di tensione (gestito da MnaSolver)
+    int current_index = -1;
+    friend class MnaSolver; // MnaSolver può accedere a current_index
+};
 
 #endif // COMPONENT_H
