@@ -1,129 +1,139 @@
 // components/Transformer.cpp
 #include "Transformer.h"
-#include <iostream> // For error messages
+#include <iostream> // Per i messaggi di errore
 
 /**
- * @brief Constructor for the Transformer component.
+ * @brief Costruttore per il componente Transformer.
  *
- * Initializes an ideal transformer with its name, four connected nodes,
- * and its turns ratio.
+ * Inizializza un trasformatore ideale con il suo nome, i quattro nodi collegati
+ * e il suo rapporto di spire.
  *
- * @param name The unique name of the transformer.
- * @param node1_p The name of the first node on the primary side (positive terminal).
- * @param node2_p The name of the second node on the primary side (negative terminal).
- * @param node1_s The name of the first node on the secondary side (positive terminal).
- * @param node2_s The name of the second node on the secondary side (negative terminal).
- * @param turns_ratio The turns ratio (Np/Ns) of the transformer. Must be non-zero.
- * @param tolerance_percent Optional tolerance percentage for component value.
+ * @param name Il nome univoco del trasformatore.
+ * @param node_names_str Un vettore di stringhe contenente i nomi dei nodi nell'ordine:
+ * [node1_p, node2_p, node1_s, node2_s] (primario positivo, primario negativo, secondario positivo, secondario negativo).
+ * @param turns_ratio Il rapporto di spire (Np/Ns) del trasformatore. Deve essere diverso da zero.
  */
-Transformer::Transformer(const std::string& name, const std::string& node1_p, const std::string& node2_p,
-                         const std::string& node1_s, const std::string& node2_s,
-                         double turns_ratio, double tolerance_percent)
-    // Pass primary nodes to the base Component constructor.
-    // The Component base class is assumed to handle node1 and node2.
-    // The secondary nodes are managed directly by the Transformer class.
-    : Component(name, node1_p, node2_p, tolerance_percent),
-      node1_s(node1_s), node2_s(node2_s), turns_ratio(turns_ratio)
+Transformer::Transformer(const std::string& name,
+                         const std::vector<std::string>& node_names_str,
+                         double turns_ratio)
+    : Component(name, node_names_str), // Passa tutti i nomi dei nodi al costruttore della classe base
+      turns_ratio_(turns_ratio)
 {
-    // An ideal transformer requires two auxiliary variables for its primary and secondary currents.
-    // We assume the base Component class has a mechanism (e.g., setNumAuxiliaryVariables)
-    // to request multiple auxiliary variables, and the simulator will assign contiguous indices.
-    setNumAuxiliaryVariables(2);
-
-    if (turns_ratio == 0.0) {
-        std::cerr << "Warning: Transformer " << name << " has a turns ratio of zero. This can lead to division by zero." << std::endl;
+    // Un trasformatore ideale richiede due variabili ausiliarie per le sue correnti primaria (Ip) e secondaria (Is).
+    // Questo è gestito dal MnaSolver che assegna gli indici delle variabili ausiliarie.
+    // Non è necessario chiamare setNumAuxiliaryVariables() qui, ma il MnaSolver deve sapere
+    // quanti ne servono per ogni componente.
+    // Per ora, assumiamo che MnaSolver gestisca questo basandosi sul tipo di componente
+    // o che un metodo getNumAuxiliaryVariables() sia implementato nella classe base Component.
+    if (turns_ratio_ == 0.0) {
+        std::cerr << "Attenzione: Transformer " << name_ << " ha un rapporto di spire pari a zero. Questo può portare a divisioni per zero." << std::endl;
     }
+    std::cout << "Transformer " << name_ << " inizializzato con rapporto di spire: " << turns_ratio_ << std::endl;
 }
 
 /**
- * @brief Applies the stamps of the ideal transformer to the MNA matrix (A) and vector (b).
+ * @brief Applica gli "stamps" del trasformatore ideale alla matrice MNA (A) e al vettore (B).
  *
- * This method introduces two auxiliary variables for the primary (Ip) and secondary (Is)
- * currents. It stamps the voltage and current relationships of an ideal transformer.
+ * Questo metodo introduce due variabili ausiliarie per le correnti primaria (Ip) e secondaria (Is).
+ * Applica le relazioni di tensione e corrente di un trasformatore ideale.
  *
- * @param A The MNA matrix to which stamps are applied.
- * @param b The MNA right-hand side vector to which stamps are applied.
- * @param x_current_guess The current guess for node voltages and branch currents (not used for this static component).
- * @param prev_solution The solution from the previous time step (not used for this static component).
- * @param time The current simulation time (not used for this static component).
- * @param dt The time step size (not used for this static component).
+ * @param num_total_equations Dimensione totale della matrice MNA.
+ * @param dt Passo temporale per la simulazione transitoria (non usato per questo componente statico).
+ * @param x Vettore della soluzione corrente (per ottenere le tensioni dei nodi).
+ * @param prev_solution Vettore della soluzione al passo temporale precedente (non usato).
+ * @param time Tempo attuale della simulazione (non usato).
+ * @param A Riferimento alla matrice MNA.
+ * @param B Riferimento al vettore delle sorgenti (RHS).
  */
 void Transformer::getStamps(
-    Eigen::MatrixXd& A, Eigen::VectorXd& b,
-    const Eigen::VectorXd& x_current_guess, const Eigen::VectorXd& prev_solution,
-    double time, double dt
+    int num_total_equations, double dt,
+    const std::vector<double>& x,
+    const std::vector<double>& prev_solution,
+    double time,
+    std::vector<std::vector<double>>& A,
+    std::vector<double>& B
 ) {
-    // Get the global indices for all four connected nodes.
-    // getNodeIndex is assumed to be a method of the base Component class (or accessible via Circuit)
-    // that correctly maps node names to their corresponding indices in the MNA matrix.
-    int idx_p1 = getNodeIndex(node1); // Primary positive node (inherited from Component::node1)
-    int idx_p2 = getNodeIndex(node2); // Primary negative node (inherited from Component::node2)
-    int idx_s1 = getNodeIndex(node1_s); // Secondary positive node
-    int idx_s2 = getNodeIndex(node2_s); // Secondary negative node
-
-    // Get the starting index for the auxiliary variables.
-    // The first auxiliary variable (for Ip) will be at aux_start_idx.
-    // The second auxiliary variable (for Is) will be at aux_start_idx + 1.
-    int aux_start_idx = getAuxiliaryVariableStartIndex();
-    int aux_idx_Ip = aux_start_idx;
-    int aux_idx_Is = aux_start_idx + 1;
-
-    // Check for valid indices. If any index is -1, it means a node or auxiliary variable
-    // was not properly registered/found in the global mapping.
-    if (idx_p1 == -1 || idx_p2 == -1 || idx_s1 == -1 || idx_s2 == -1 || aux_start_idx == -1) {
-        std::cerr << "Error: Invalid node or auxiliary variable index for Transformer " << name << std::endl;
+    // Ottieni gli indici globali per tutti e quattro i nodi collegati.
+    // Assumiamo che node_ids_ contenga [node1_p, node2_p, node1_s, node2_s]
+    // nell'ordine: Primario Positivo (0), Primario Negativo (1), Secondario Positivo (2), Secondario Negativo (3)
+    if (node_ids_.size() != 4) {
+        std::cerr << "Errore: Transformer " << name_ << " si aspetta 4 ID di nodo, ma ne ha " << node_ids_.size() << std::endl;
         return;
     }
 
-    // Ensure turns_ratio is not zero to avoid division by zero.
-    if (turns_ratio == 0.0) {
-        // This case should ideally be caught in the constructor or handled gracefully.
-        // For stamping, we can effectively treat it as an open circuit on the secondary
-        // or prevent stamping if it's truly problematic. For now, just return.
-        std::cerr << "Error: Transformer " << name << " has a turns ratio of zero, cannot stamp." << std::endl;
+    int idx_p1 = node_ids_[0];
+    int idx_p2 = node_ids_[1];
+    int idx_s1 = node_ids_[2];
+    int idx_s2 = node_ids_[3];
+
+    // Ottieni gli indici per le variabili ausiliarie (correnti primaria e secondaria).
+    // Questi indici devono essere gestiti dal MnaSolver.
+    // Come per l'Attenuatore, useremo un indice fittizio temporaneo.
+    // L'MnaSolver dovrebbe assegnare questi indici in modo consecutivo.
+    // Assumiamo che le variabili ausiliarie siano aggiunte dopo tutti i nodi.
+    // Per un trasformatore, ci sono 2 variabili ausiliarie.
+    // L'indice della prima variabile ausiliaria per questo componente sarà `num_total_equations - 2`
+    // e la seconda `num_total_equations - 1` se è l'ultimo componente che aggiunge variabili ausiliarie.
+    // Questo è un placeholder e deve essere gestito correttamente dal MnaSolver.
+    // Idealmente, Component dovrebbe avere un metodo `getAuxiliaryVariableStartIndex()`.
+    // Per ora, useremo una convenzione che dovrà essere allineata con l'MnaSolver.
+    // Se il MnaSolver assegna `component_id_` come indice di partenza per le variabili ausiliarie,
+    // allora `aux_idx_Ip = component_id_` e `aux_idx_Is = component_id_ + 1`.
+    // Questo richiede che MnaSolver sia consapevole di quanti aux_vars ogni componente ha.
+    // Per ora, userò un indice basato su una stima del numero totale di variabili ausiliarie.
+    // Questo è un *workaround* temporaneo.
+    int aux_idx_Ip = num_total_equations - 2; // Placeholder per la corrente primaria
+    int aux_idx_Is = num_total_equations - 1; // Placeholder per la corrente secondaria
+
+    // Assicurati che turns_ratio non sia zero per evitare divisioni per zero.
+    if (turns_ratio_ == 0.0) {
+        std::cerr << "Errore: Transformer " << name_ << " ha un rapporto di spire pari a zero, impossibile applicare gli stamps." << std::endl;
         return;
     }
 
-    // --- Apply stamps for the ideal transformer equations ---
+    // --- Applica gli stamps per le equazioni del trasformatore ideale ---
 
-    // Equation 1: V_primary - a * V_secondary = 0
-    // (V(node1_p) - V(node2_p)) - turns_ratio * (V(node1_s) - V(node2_s)) = 0
-    // This equation is placed in the row corresponding to the primary current auxiliary variable (Ip).
-    A(aux_idx_Ip, idx_p1) += 1.0;
-    A(aux_idx_Ip, idx_p2) -= 1.0;
-    A(aux_idx_Ip, idx_s1) -= turns_ratio;
-    A(aux_idx_Ip, idx_s2) += turns_ratio;
-    // b(aux_idx_Ip) remains 0.0 as it's a homogeneous equation.
+    // Equazione 1: V_primario - turns_ratio * V_secondario = 0
+    // (V(idx_p1) - V(idx_p2)) - turns_ratio * (V(idx_s1) - V(idx_s2)) = 0
+    // Questa equazione di vincolo va nella riga corrispondente alla variabile ausiliaria della corrente primaria (Ip).
+    A[aux_idx_Ip][idx_p1] += 1.0;
+    A[aux_idx_Ip][idx_p2] -= 1.0;
+    A[aux_idx_Ip][idx_s1] -= turns_ratio_;
+    A[aux_idx_Ip][idx_s2] += turns_ratio_;
+    // B[aux_idx_Ip] rimane 0.0 poiché è un'equazione omogenea.
 
-    // Equation 2: Ip + (1/a) * Is = 0
-    // This equation is placed in the row corresponding to the secondary current auxiliary variable (Is).
-    A(aux_idx_Is, aux_idx_Ip) += 1.0;
-    A(aux_idx_Is, aux_idx_Is) += 1.0 / turns_ratio;
-    // b(aux_idx_Is) remains 0.0 as it's a homogeneous equation.
+    // Equazione 2: Ip + (1/turns_ratio) * Is = 0
+    // Questa equazione va nella riga corrispondente alla variabile ausiliaria della corrente secondaria (Is).
+    A[aux_idx_Is][aux_idx_Ip] += 1.0;
+    A[aux_idx_Is][aux_idx_Is] += 1.0 / turns_ratio_;
+    // B[aux_idx_Is] rimane 0.0 poiché è un'equazione omogenea.
 
-    // --- Apply current contributions to node equations ---
+    // --- Applica i contributi di corrente alle equazioni dei nodi ---
 
-    // Primary side current: Ip enters node1_p and leaves node2_p
-    A(idx_p1, aux_idx_Ip) += 1.0;
-    A(idx_p2, aux_idx_Ip) -= 1.0;
+    // Corrente lato primario: Ip entra in idx_p1 ed esce da idx_p2
+    A[idx_p1][aux_idx_Ip] += 1.0;
+    A[idx_p2][aux_idx_Ip] -= 1.0;
 
-    // Secondary side current: Is enters node1_s and leaves node2_s
-    A(idx_s1, aux_idx_Is) += 1.0;
-    A(idx_s2, aux_idx_Is) -= 1.0;
+    // Corrente lato secondario: Is entra in idx_s1 ed esce da idx_s2
+    A[idx_s1][aux_idx_Is] += 1.0;
+    A[idx_s2][aux_idx_Is] -= 1.0;
 }
 
 /**
- * @brief Updates the internal state of the transformer.
+ * @brief Aggiorna lo stato interno del trasformatore.
  *
- * As an ideal transformer is a static, lossless component (its behavior
- * depends only on instantaneous voltages and currents, not on past states),
- * this method does not perform any state updates. It is provided to satisfy
- * the Component base class interface, ensuring all virtual methods are implemented.
+ * Essendo un trasformatore ideale un componente statico e senza perdite (il suo comportamento
+ * dipende solo dalle tensioni e correnti istantanee, non dagli stati passati),
+ * questo metodo non esegue alcun aggiornamento di stato. È fornito per soddisfare
+ * l'interfaccia della classe base Component, garantendo che tutti i metodi virtuali siano implementati.
  *
- * @param v_curr The current voltage across the component (not used).
- * @param i_curr The current flowing through the component (not used).
+ * @param current_solution Il vettore della soluzione corrente (non usato).
+ * @param prev_solution Il vettore della soluzione precedente (non usato).
+ * @param dt Il passo temporale (non usato).
  */
-void Transformer::updateState(double v_curr, double i_curr) {
-    // No internal state to update for an ideal transformer model.
-    // This method is intentionally left empty.
+void Transformer::updateState(const std::vector<double>& current_solution,
+                         const std::vector<double>& prev_solution,
+                         double dt) {
+    // Nessuno stato interno da aggiornare per un modello di trasformatore ideale.
+    // Questo metodo è intenzionalmente lasciato vuoto.
 }
