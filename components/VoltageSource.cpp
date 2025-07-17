@@ -1,28 +1,30 @@
-// File: VoltageSource.cpp
+// components/VoltageSource.cpp
 #include "VoltageSource.h"
-#include <cmath> // For M_PI (or define PI if not available)
+#include <cmath> // Per M_PI, std::sin, std::fmod
+#include <iostream> // Per messaggi di errore
 
-// Define PI if M_PI is not available in cmath on some compilers
+// Definisci PI se M_PI non è disponibile in cmath su alcuni compilatori
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 /**
- * @brief Implementation of the VoltageSource class constructor.
- * @param name Name of the component.
- * @param output_node Name of the output node.
- * @param ground_node Name of the ground node.
- * @param type The type of waveform to generate.
- * @param initial_voltage Initial DC voltage or amplitude for AC waveforms.
- * @param frequency Frequency for AC waveforms (Hz).
- * @param phase_offset Phase offset for AC waveforms (radians).
- * @param sample_rate The audio sample rate in Hz.
+ * @brief Implementazione del costruttore della classe VoltageSource.
+ * @param name Nome del componente.
+ * @param node_names_str Un vettore di stringhe contenente i nomi dei nodi nell'ordine:
+ * [output_node, ground_node].
+ * @param type Il tipo di forma d'onda da generare.
+ * @param initial_voltage Tensione DC iniziale o ampiezza per le forme d'onda AC.
+ * @param frequency Frequenza per le forme d'onda AC (Hz).
+ * @param phase_offset Offset di fase per le forme d'onda AC (radianti).
+ * @param sample_rate Il sample rate audio in Hz (usato per le sorgenti AC).
  */
-VoltageSource::VoltageSource(const std::string& name, const std::string& output_node,
-                             const std::string& ground_node, WaveformType type,
+VoltageSource::VoltageSource(const std::string& name,
+                             const std::vector<std::string>& node_names_str,
+                             WaveformType type,
                              double initial_voltage, double frequency,
                              double phase_offset, double sample_rate)
-    : Component(name, "", output_node, ground_node), // VoltageSource typically has no input node itself, it generates output
+    : Component(name, node_names_str), // Chiama il costruttore della classe base
       type_(type),
       voltage_(initial_voltage),
       frequency_(frequency),
@@ -30,28 +32,35 @@ VoltageSource::VoltageSource(const std::string& name, const std::string& output_
       sample_rate_(sample_rate),
       current_phase_(0.0)
 {
-    // Ensure sample rate is valid for AC waveforms
+    // Una sorgente di tensione indipendente richiede una variabile ausiliaria per la sua corrente di ramo.
+    // Questo è gestito dal MnaSolver che assegna gli indici delle variabili ausiliarie.
+    // Non è necessario chiamare setNumAuxiliaryVariables() qui, ma il MnaSolver deve sapere
+    // quanti ne servono per ogni componente.
+    std::cout << "VoltageSource " << name_ << " inizializzato (Tipo: "
+              << (type_ == DC ? "DC" : (type_ == SINE ? "SINE" : (type_ == SQUARE ? "SQUARE" : "EXTERNAL")))
+              << ", Tensione: " << voltage_ << "V, Freq: " << frequency_ << "Hz)." << std::endl;
+
+    // Assicurati che il sample rate sia valido per le forme d'onda AC
     if (sample_rate_ <= 0) sample_rate_ = 44100.0;
-    // Ensure frequency is non-negative
+    // Assicurati che la frequenza non sia negativa
     if (frequency_ < 0) frequency_ = 0.0;
 }
 
 /**
- * @brief Processes a single sample for the voltage source.
+ * @brief Genera la tensione istantanea della sorgente.
  *
- * This method generates the appropriate voltage based on the `WaveformType` configured.
- * - `DC`: Returns the constant `voltage_`.
- * - `SINE`: Generates a sine wave based on `voltage_` (amplitude), `frequency_`,
- * `phase_offset_`, and `sample_rate_`. The `current_phase_` is updated for
- * the next sample.
- * - `SQUARE`: Generates a square wave. The output is `voltage_` for the first
- * half of the period and `-voltage_` for the second half.
- * - `EXTERNAL`: Simply returns the `input_sample` provided, acting as a pass-through.
+ * Questo metodo genera la tensione appropriata in base al `WaveformType` configurato.
+ * - `DC`: Restituisce la `voltage_` costante.
+ * - `SINE`: Genera un'onda sinusoidale basata su `voltage_` (ampiezza), `frequency_`,
+ * `phase_offset_` e `sample_rate_`. La `current_phase_` viene aggiornata per il prossimo campione.
+ * - `SQUARE`: Genera un'onda quadra. L'output è `voltage_` per la prima metà del periodo
+ * e `-voltage_` per la seconda metà.
+ * - `EXTERNAL`: Semplicemente restituisce l'`input_sample` fornito, agendo come un pass-through.
  *
- * @param input_sample The input sample (only used for EXTERNAL type).
- * @return The generated or passed-through voltage.
+ * @param time Il tempo attuale della simulazione.
+ * @return La tensione generata.
  */
-double VoltageSource::process(double input_sample) {
+double VoltageSource::getInstantaneousVoltage(double time) {
     double output_voltage = 0.0;
 
     switch (type_) {
@@ -59,39 +68,39 @@ double VoltageSource::process(double input_sample) {
             output_voltage = voltage_;
             break;
         case SINE: {
-            // Calculate instantaneous phase in radians
-            double phase_radians = current_phase_ + phase_offset_;
+            // Calcola la fase istantanea in radianti
+            // Usiamo il tempo assoluto per la generazione, non un phase accumulator incrementale,
+            // per evitare accumulo di errori e per essere coerenti con MNA.
+            double phase_radians = (2.0 * M_PI * frequency_ * time) + phase_offset_;
             output_voltage = voltage_ * std::sin(phase_radians);
-
-            // Update phase for the next sample
-            current_phase_ += (2.0 * M_PI * frequency_) / sample_rate_;
-            // Keep phase within 0 to 2*PI to prevent large numbers and precision issues
-            current_phase_ = std::fmod(current_phase_, 2.0 * M_PI);
             break;
         }
         case SQUARE: {
-            // Calculate instantaneous phase in radians for square wave logic
-            double phase_radians = current_phase_ + phase_offset_;
-            // Normalize phase to 0-1 range for easier square wave logic
+            // Calcola la fase istantanea in radianti per la logica dell'onda quadra
+            double phase_radians = (2.0 * M_PI * frequency_ * time) + phase_offset_;
+            // Normalizza la fase all'intervallo 0-1 per una logica più semplice dell'onda quadra
             double normalized_phase = std::fmod(phase_radians / (2.0 * M_PI), 1.0);
-            if (normalized_phase < 0) normalized_phase += 1.0; // Ensure positive
+            if (normalized_phase < 0) normalized_phase += 1.0; // Assicurati che sia positivo
 
-            if (normalized_phase < 0.5) { // First half of the period
+            if (normalized_phase < 0.5) { // Prima metà del periodo
                 output_voltage = voltage_;
-            } else { // Second half of the period
+            } else { // Seconda metà del periodo
                 output_voltage = -voltage_;
             }
-
-            // Update phase for the next sample
-            current_phase_ += (2.0 * M_PI * frequency_) / sample_rate_;
-            current_phase_ = std::fmod(current_phase_, 2.0 * M_PI);
             break;
         }
         case EXTERNAL:
-            output_voltage = input_sample;
+            // Per il tipo EXTERNAL, la tensione dovrebbe essere fornita dall'esterno
+            // (es. da un file audio o un altro componente).
+            // Questo metodo non ha un parametro input_sample, quindi non può usarlo.
+            // In un contesto MNA, una sorgente EXTERNAL potrebbe richiedere un meccanismo
+            // per impostare il suo valore in ogni passo temporale.
+            // Per ora, restituirà 0.0, a meno che non venga impostato un valore esplicito.
+            // Questo caso d'uso specifico potrebbe richiedere un approccio diverso nell'integrazione MNA.
+            output_voltage = 0.0; // Placeholder
+            std::cerr << "Attenzione: VoltageSource " << name_ << " di tipo EXTERNAL chiamato senza un valore di input esterno." << std::endl;
             break;
         default:
-            // Should not happen, but as a fallback
             output_voltage = 0.0;
             break;
     }
@@ -99,11 +108,93 @@ double VoltageSource::process(double input_sample) {
     return output_voltage;
 }
 
-// Setter implementations
+
+/**
+ * @brief Applica gli "stamps" della sorgente di tensione alla matrice MNA (A) e al vettore (B).
+ *
+ * Questo metodo introduce una variabile ausiliaria per la corrente che fluisce attraverso la sorgente di tensione.
+ * Gli stamps impongono la relazione di tensione V(node_out) - V(node_ground) = V_source.
+ *
+ * @param num_total_equations Dimensione totale della matrice MNA.
+ * @param dt Passo temporale (non usato per questo componente statico).
+ * @param x Vettore della soluzione corrente (non usato per lo stamping).
+ * @param prev_solution Vettore della soluzione al passo temporale precedente (non usato).
+ * @param time Tempo attuale della simulazione. Usato per le sorgenti AC.
+ * @param A Riferimento alla matrice MNA.
+ * @param B Riferimento al vettore delle sorgenti (RHS).
+ */
+void VoltageSource::getStamps(
+    int num_total_equations, double dt,
+    const std::vector<double>& x,
+    const std::vector<double>& prev_solution,
+    double time,
+    std::vector<std::vector<double>>& A,
+    std::vector<double>& B
+) {
+    // Ottieni gli indici globali per i nodi di uscita e ground.
+    // Assumiamo che node_ids_ contenga [output_node, ground_node]
+    if (node_ids_.size() != 2) {
+        std::cerr << "Errore: VoltageSource " << name_ << " si aspetta 2 ID di nodo, ma ne ha " << node_ids_.size() << std::endl;
+        return;
+    }
+
+    int idx_out = node_ids_[0];
+    int idx_gnd = node_ids_[1]; // Questo dovrebbe essere sempre 0 per il ground
+
+    // Ottieni l'indice per la variabile ausiliaria (corrente della sorgente di tensione).
+    // L'MnaSolver assegnerà un indice univoco per ogni sorgente di tensione.
+    // Assumiamo che `component_id_` sia l'indice della variabile ausiliaria.
+    // Questo è un *workaround* temporaneo. MnaSolver dovrebbe gestire questo.
+    int aux_idx = component_id_; // Placeholder: l'MnaSolver dovrà assegnare questo correttamente
+
+    // Controlla la validità degli indici
+    if (idx_out < 0 || idx_out >= num_total_equations ||
+        idx_gnd < 0 || idx_gnd >= num_total_equations ||
+        aux_idx < 0 || aux_idx >= num_total_equations) // aux_idx dovrebbe essere > num_nodes
+    {
+        std::cerr << "Errore: Indice di nodo o ausiliario non valido per VoltageSource " << name_ << std::endl;
+        return;
+    }
+
+    // Ottieni la tensione istantanea della sorgente
+    double V_source = getInstantaneousVoltage(time);
+
+    // --- Applica gli stamps per l'equazione di vincolo della sorgente di tensione ---
+    // Equazione: V(idx_out) - V(idx_gnd) = V_source
+    // Questa equazione va nella riga corrispondente alla variabile ausiliaria (corrente).
+    A[aux_idx][idx_out] += 1.0;
+    A[aux_idx][idx_gnd] -= 1.0;
+    B[aux_idx] += V_source; // La tensione della sorgente va nel RHS
+
+    // --- Applica i contributi di corrente alle equazioni dei nodi ---
+    // La variabile ausiliaria rappresenta la corrente che esce da idx_gnd ed entra in idx_out.
+    A[idx_out][aux_idx] += 1.0;
+    A[idx_gnd][aux_idx] -= 1.0;
+}
+
+/**
+ * @brief Aggiorna lo stato interno della sorgente di tensione.
+ *
+ * Essendo una sorgente di tensione ideale, non ha uno stato interno da aggiornare
+ * nel senso di condensatori o induttori. Questo metodo è fornito per soddisfare
+ * l'interfaccia della classe base Component.
+ *
+ * @param current_solution Il vettore della soluzione corrente (non usato).
+ * @param prev_solution Il vettore della soluzione precedente (non usato).
+ * @param dt Il passo temporale (non usato).
+ */
+void VoltageSource::updateState(const std::vector<double>& current_solution,
+                         const std::vector<double>& prev_solution,
+                         double dt) {
+    // Nessuno stato interno da aggiornare per una sorgente di tensione ideale.
+    // Questo metodo è intenzionalmente lasciato vuoto.
+}
+
+// Setter implementations (dal tuo codice originale)
 void VoltageSource::setWaveformType(WaveformType type) {
     type_ = type;
     // Reset phase if changing to an AC type to ensure a consistent start
-    if (type == SINE || type == SQUARE) {
+    if (type_ == SINE || type_ == SQUARE) {
         current_phase_ = 0.0;
     }
 }
