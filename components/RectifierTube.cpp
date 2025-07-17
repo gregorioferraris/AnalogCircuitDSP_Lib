@@ -1,6 +1,7 @@
 // File: RectifierTube.cpp
 #include "RectifierTube.h"
 #include <algorithm> // For std::max (though not strictly used in final version, good to keep)
+#include <cmath> // For std::fabs, std::atan
 
 /**
  * @brief Implementation of the RectifierTube class constructor.
@@ -69,4 +70,17 @@ double RectifierTube::process(double input_sample) {
     double final_output = softness_factor_ * std::atan(signal_after_drop / softness_factor_);
 
     return final_output;
+}
+
+/**
+ * @brief Updates the internal state of the RectifierTube.
+ *
+ * This component is a static audio effect, so it does not have
+ * internal state that evolves over time. This method is empty.
+ *
+ * @param v_curr The current voltage (not used).
+ * @param i_curr The current (not used).
+ */
+void RectifierTube::updateState(double v_curr, double i_curr) {
+    // No state to update for this static audio effect.
 }
