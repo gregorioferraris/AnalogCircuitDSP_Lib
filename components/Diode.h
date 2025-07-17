@@ -1,45 +1,84 @@
+// components/Diode.h
 #ifndef DIODE_H
 #define DIODE_H
 
-#include <string>
-#include <vector>
-#include <cmath> // Per std::exp
-#include <limits> // Per std::numeric_limits
+#include "Component.h" // Include la classe base Component
+#include <string>        // Per std::string
+#include <vector>        // Per std::vector
+#include <cmath>         // Per std::exp
 
-#include <Eigen/Dense> // Per Eigen::MatrixXd e Eigen::VectorXd
-
-// Assicurati che Component sia già definito (es. in Component.h)
-// Nel nostro caso, lo abbiamo già fatto in CurrentSource.h, quindi potresti
-// includere direttamente quel file o creare un Component.h separato.
-// Per ora, lo includiamo da CurrentSource.h per avere la base Component.
-#include "CurrentSource.h" // Include la definizione della classe Component
-
-// --- Classe Diode ---
+/**
+ * @class Diode
+ * @brief Rappresenta un componente diodo in una simulazione di circuito.
+ *
+ * Questa classe modella un diodo ideale con una corrente di saturazione e un coefficiente di emissione.
+ * È un componente non lineare e richiede un solutore iterativo (es. Newton-Raphson)
+ * per una simulazione accurata.
+ */
 class Diode : public Component {
 public:
-    // Costruttore
-    Diode(const std::string& name, const std::string& anode_node, const std::string& cathode_node,
-          double Is = 1e-14, double N = 1.0, double Vt = 0.0258);
+    double Is; // Corrente di saturazione (A)
+    double N;  // Coefficiente di emissione (o fattore di idealità)
+    double Vt; // Tensione termica (V) - tipicamente 0.02585V a 300K
 
-    // Implementazione del metodo virtuale getStamps dalla classe base Component
-    // Per i componenti non lineari, questo metodo contribuisce alla matrice Jacobiana (stamp_A)
-    // e al vettore di "mancato equilibrio" (stamp_B) per Newton-Raphson.
-    void getStamps(Eigen::MatrixXd& stamp_A, Eigen::VectorXd& stamp_B,
-                   int num_total_equations, double dt,
-                   const Eigen::VectorXd& current_solution_guess,
-                   const Eigen::VectorXd& prev_solution,
-                   double time) override;
+    /**
+     * @brief Costruttore per il componente Diode.
+     * @param name Il nome univoco del diodo.
+     * @param node_names_str Un vettore di stringhe contenente i nomi dei due nodi (anodo, catodo).
+     * @param saturation_current La corrente di saturazione inversa (Is) in Ampere.
+     * @param emission_coefficient Il coefficiente di emissione (N).
+     * @param thermal_voltage La tensione termica (Vt) in Volt.
+     */
+    Diode(const std::string& name, const std::vector<std::string>& node_names_str,
+          double saturation_current, double emission_coefficient, double thermal_voltage = 0.02585);
 
-    // Calcola la corrente attraverso il diodo data la tensione ai suoi capi (Vd = V_anode - V_cathode)
-    double calculateCurrent(double Vd) const;
+    /**
+     * @brief Crea una copia profonda dell'oggetto Diode.
+     * @return Un puntatore a un nuovo oggetto Diode, che è una copia dell'istanza corrente.
+     */
+    Component* clone() const override { return new Diode(*this); }
 
-    // Calcola la conduttanza dinamica del diodo (dI/dVd)
-    double calculateConductance(double Vd) const;
+    /**
+     * @brief Applica gli "stamps" del diodo alla matrice MNA (A) e al vettore (B).
+     *
+     * Per un diodo, gli stamps sono non lineari e dipendono dalla tensione corrente.
+     * Questo metodo calcola la conduttanza incrementale (g) e la corrente equivalente (Ieq)
+     * per il modello di linearizzazione di Newton-Raphson.
+     *
+     * @param num_total_equations Dimensione totale della matrice MNA.
+     * @param dt Passo temporale (non usato direttamente per il diodo statico).
+     * @param x Vettore della soluzione corrente (tensione ai nodi per il calcolo di g e Ieq).
+     * @param prev_solution La soluzione dal passo temporale precedente (non usata per il diodo statico).
+     * @param time Il tempo di simulazione corrente (non usato per il diodo statico).
+     * @param A La matrice MNA a cui vengono applicati gli stamps.
+     * @param B Il vettore lato destro MNA a cui vengono applicati gli stamps.
+     */
+    void getStamps(
+        int num_total_equations, double dt,
+        const std::vector<double>& x,
+        const std::vector<double>& prev_solution,
+        double time,
+        std::vector<std::vector<double>>& A,
+        std::vector<double>& B
+    ) override;
+
+    /**
+     * @brief Aggiorna lo stato interno del diodo.
+     *
+     * Per un diodo ideale, non c'è uno stato interno che evolve nel tempo.
+     * Questo metodo è lasciato vuoto per questo modello.
+     *
+     * @param current_solution Il vettore della soluzione corrente (non usato).
+     * @param prev_solution Il vettore della soluzione precedente (non usato).
+     * @param dt Il passo temporale (non usato).
+     */
+    void updateState(const std::vector<double>& current_solution,
+                     const std::vector<double>& prev_solution,
+                     double dt) override;
 
 private:
-    double Is_; // Corrente di saturazione inversa
-    double N_;  // Fattore di idealità
-    double Vt_; // Tensione termica (kT/q)
+    // Funzione helper per calcolare la corrente del diodo
+    double calculateDiodeCurrent(double Vd) const;
 };
 
 #endif // DIODE_H
