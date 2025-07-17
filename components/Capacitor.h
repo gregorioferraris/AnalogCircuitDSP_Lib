@@ -10,9 +10,9 @@
  * @class Capacitor
  * @brief Rappresenta un componente condensatore in una simulazione di circuito.
  *
- * Questa classe modella un condensatore lineare. Implementa i metodi per applicare
- * i "stamps" alla matrice MNA e al vettore RHS usando il metodo di integrazione
- * trapezoidale per l'analisi transitoria.
+ * Questa classe modella un condensatore lineare. Implementa metodi per applicare
+ * gli "stamps" alla matrice MNA e al vettore RHS utilizzando il metodo di
+ * integrazione trapezoidale per l'analisi transitoria.
  */
 class Capacitor : public Component {
 public:
@@ -41,13 +41,13 @@ public:
      * @brief Applica gli "stamps" del condensatore alla matrice MNA (A) e al vettore (B).
      *
      * Utilizza il metodo di integrazione trapezoidale per modellare il condensatore
-     * in analisi transitoria.
+     * nell'analisi transitoria.
      *
      * @param num_total_equations Dimensione totale della matrice MNA.
      * @param dt Passo temporale.
-     * @param x Vettore della soluzione corrente (tensione ai nodi e correnti di ramo).
+     * @param x Vettore della soluzione corrente (tensioni dei nodi e correnti di ramo).
      * @param prev_solution La soluzione dal passo temporale precedente.
-     * @param time Il tempo di simulazione corrente.
+     * @param time Tempo di simulazione corrente.
      * @param A La matrice MNA a cui vengono applicati gli stamps.
      * @param B Il vettore lato destro MNA a cui vengono applicati gli stamps.
      */
@@ -63,7 +63,7 @@ public:
     /**
      * @brief Aggiorna lo stato interno del condensatore.
      *
-     * Aggiorna la tensione e la corrente del condensatore per il passo temporale successivo.
+     * Aggiorna la tensione e la corrente del condensatore per il prossimo passo temporale.
      *
      * @param current_solution Il vettore della soluzione corrente.
      * @param prev_solution Il vettore della soluzione precedente.
