@@ -160,37 +160,31 @@ double PNP_BJT::calculateDiodeConductance(double V, double Is, double Vt, double
  * Vbc_curr = Vb_curr - Vc_curr
  *
  * Calculate currents and conductances for BE and BC diodes:
- * I_BE = Is_ * (exp(Vbe_curr / (ideality_factor_ * Vt_)) - 1)
- * G_BE = (Is_ / (ideality_factor_ * Vt_)) * exp(Vbe_curr / (ideality_factor_ * Vt_))
+ * I_BE = Is_ * (exp(Veb_curr / (ideality_factor_ * Vt_)) - 1) where Veb_curr = Ve_curr - Vb_curr
+ * G_BE = (Is_ / (ideality_factor_ * Vt_)) * exp(Veb_curr / (ideality_factor_ * Vt_))
  *
- * I_BC = Is_ * (exp(Vbc_curr / (ideality_factor_ * Vt_)) - 1)
- * G_BC = (Is_ / (ideality_factor_ * Vt_)) * exp(Vbc_curr / (ideality_factor_ * Vt_))
+ * I_BC = Is_ * (exp(Vcb_curr / (ideality_factor_ * Vt_)) - 1) where Vcb_curr = Vc_curr - Vb_curr
+ * G_BC = (Is_ / (ideality_factor_ * Vt_)) * exp(Vcb_curr / (ideality_factor_ * Vt_))
  *
  * Equivalent current sources:
- * I_BE_eq = I_BE - G_BE * Vbe_curr
- * I_BC_eq = I_BC - G_BC * Vbc_curr
+ * I_BE_eq = I_BE - G_BE * Veb_curr
+ * I_BC_eq = I_BC - G_BC * Vcb_curr
  *
- * Transconductance gm for PNP (current from Collector to Emitter controlled by Vbe):
- * gm = d(Ic)/d(Vbe) = beta_F * d(Ibe)/d(Vbe) = beta_F * G_BE
+ * Transconductance gm for PNP (current from Collector to Emitter controlled by Veb):
+ * gm = d(Ic)/d(Veb) = beta_F * d(Ibe)/d(Veb) = beta_F * G_BE
  *
  * Now, apply stamps:
  * KCL at Base (idx_b):
- * - G_BE * Vb + G_BE * Ve - I_BE_eq  (from BE diode)
- * - G_BC * Vb + G_BC * Vc - I_BC_eq  (from BC diode)
- * ...
- * KCL at Collector (idx_c):
- * + G_BC * Vb - G_BC * Vc + I_BC_eq  (from BC diode)
- * + gm * Vb - gm * Ve                (from controlled current source gm*Vbe)
- * ...
- * KCL at Emitter (idx_e):
- * + G_BE * Vb - G_BE * Ve + I_BE_eq  (from BE diode)
- * - gm * Vb + gm * Ve                (from controlled current source gm*Vbe)
- * ...
+ * - From BE diode (current I_BE_diode flows E->B, so it flows INTO Base from Emitter)
+ * - From BC diode (current I_BC_diode flows C->B, so it flows INTO Base from Collector)
  *
- * Note: For PNP, current flows from Emitter to Collector.
- * So, the controlled current source should be from Emitter to Collector.
- * Let's define it as I_C_controlled = beta_F * I_BE.
- * This current flows from Emitter to Collector. So, it adds to Emitter KCL, subtracts from Collector KCL.
+ * KCL at Collector (idx_c):
+ * - From BC diode (current I_BC_diode flows C->B, so it flows OUT of Collector to Base)
+ * - From controlled current source (I_C_controlled_actual flows E->C, so it flows INTO Collector from Emitter)
+ *
+ * KCL at Emitter (idx_e):
+ * - From BE diode (current I_BE_diode flows E->B, so it flows OUT of Emitter to Base)
+ * - From controlled current source (I_C_controlled_actual flows E->C, so it flows OUT of Emitter to Collector)
  *
  * @param A The MNA matrix to which stamps are applied.
  * @param b The MNA right-hand side vector to which stamps are applied.
@@ -222,48 +216,30 @@ void PNP_BJT::getStamps(
     double Ve_curr = (idx_e == 0) ? 0.0 : x_current_guess(idx_e - 1);
 
     // Calculate terminal voltages
-    double Vbe_curr = Vb_curr - Ve_curr; // Base-Emitter voltage
-    double Vbc_curr = Vb_curr - Vc_curr; // Base-Collector voltage
+    double Veb_curr = Ve_curr - Vb_curr; // Emitter-Base voltage (positive for forward bias of BE diode)
+    double Vcb_curr = Vc_curr - Vb_curr; // Collector-Base voltage (positive for forward bias of BC diode)
 
-    // --- BE Diode (Base-Emitter) ---
-    // For PNP, BE diode conducts when Vbe is negative (Vb < Ve).
-    // The diode equation typically uses V_forward. Here, Vbe is the voltage.
-    // We need to invert Vbe for the standard diode equation if it's based on V_anode - V_cathode.
-    // Let's use the absolute value for the diode calculation, and then apply current direction.
-    // A PNP's BE junction is forward biased when Vb < Ve, so Vbe is negative.
-    // The current I_BE (flowing from Emitter to Base) is positive when Vbe is negative.
-    // I_BE = Is * (exp(-Vbe / (n*Vt)) - 1)  <-- This is for current flowing from E to B.
-    // Or, use Veb = Ve - Vb.
-    double Veb_curr = Ve_curr - Vb_curr; // Emitter-Base voltage (positive for forward bias)
-
-    double I_BE_diode = calculateDiodeCurrent(Veb_curr, Is_, Vt_, ideality_factor_); // Current flowing E->B
-    double G_BE_diode = calculateDiodeConductance(Veb_curr, Is_, Vt_, ideality_factor_); // Conductance of E-B diode
+    // --- BE Diode (Emitter-Base) ---
+    // Current I_BE_diode flows from Emitter to Base
+    double I_BE_diode = calculateDiodeCurrent(Veb_curr, Is_, Vt_, ideality_factor_);
+    double G_BE_diode = calculateDiodeConductance(Veb_curr, Is_, Vt_, ideality_factor_);
 
     // Equivalent current source for BE diode: I_eq = I_actual - G_eq * V_actual
     double I_BE_eq = I_BE_diode - G_BE_diode * Veb_curr;
 
-    // --- BC Diode (Base-Collector) ---
-    // For PNP, BC diode conducts when Vbc is negative (Vb < Vc).
-    double Vcb_curr = Vc_curr - Vb_curr; // Collector-Base voltage (positive for forward bias)
-
-    double I_BC_diode = calculateDiodeCurrent(Vcb_curr, Is_, Vt_, ideality_factor_); // Current flowing C->B
-    double G_BC_diode = calculateDiodeConductance(Vcb_curr, Is_, Vt_, ideality_factor_); // Conductance of C-B diode
+    // --- BC Diode (Collector-Base) ---
+    // Current I_BC_diode flows from Collector to Base
+    double I_BC_diode = calculateDiodeCurrent(Vcb_curr, Is_, Vt_, ideality_factor_);
+    double G_BC_diode = calculateDiodeConductance(Vcb_curr, Is_, Vt_, ideality_factor_);
 
     // Equivalent current source for BC diode
     double I_BC_eq = I_BC_diode - G_BC_diode * Vcb_curr;
 
     // --- Controlled Current Source (Collector Current) ---
-    // In forward active region, Ic = -beta_F * Ib (current flows out of Collector)
-    // Or, Ic = -alpha_F * I_E_diode where I_E_diode is the diode current of BE junction.
-    // Let's use Ic = -beta_F * I_BE_diode (current into collector is negative, so current out is positive)
-    // This current flows from Emitter to Collector.
-    // The companion model for a controlled current source:
-    // I_controlled = gm * V_control
-    // gm = d(I_controlled)/d(V_control)
-    // I_controlled_eq = I_controlled_actual - gm * V_control_actual
-    // Here, I_controlled is the collector current, controlled by Veb.
-    // I_C_controlled_actual = beta_F_ * I_BE_diode (current from E to C)
-    // gm_val = d(I_C_controlled_actual)/d(Veb) = beta_F_ * G_BE_diode
+    // In forward active region, Ic = beta_F * I_BE_diode (current from Emitter to Collector)
+    // This current is controlled by Veb.
+    // I_C_controlled_actual = beta_F_ * I_BE_diode
+    // Transconductance gm = d(I_C_controlled_actual)/d(Veb) = beta_F_ * G_BE_diode
 
     double I_C_controlled_actual = beta_F_ * I_BE_diode; // Current from Emitter to Collector
     double gm_val = beta_F_ * G_BE_diode; // Transconductance from Veb to Ic
@@ -275,36 +251,44 @@ void PNP_BJT::getStamps(
 
     // KCL at Base node (idx_b)
     // From BE diode (current I_BE_diode flows E->B, so it flows INTO Base from Emitter)
+    // I_B = I_BE_diode + I_BC_diode
+    // Stamp for I_BE_diode:
     A(idx_b, idx_b) += G_BE_diode; // Vb coefficient
     A(idx_b, idx_e) -= G_BE_diode; // Ve coefficient
-    b(idx_b) -= I_BE_eq;           // Equivalent current source
+    b(idx_b) -= I_BE_eq;           // Equivalent current source (current flows INTO node)
 
-    // From BC diode (current I_BC_diode flows C->B, so it flows INTO Base from Collector)
+    // Stamp for I_BC_diode:
     A(idx_b, idx_b) += G_BC_diode; // Vb coefficient
     A(idx_b, idx_c) -= G_BC_diode; // Vc coefficient
-    b(idx_b) -= I_BC_eq;           // Equivalent current source
+    b(idx_b) -= I_BC_eq;           // Equivalent current source (current flows INTO node)
+
 
     // KCL at Collector node (idx_c)
     // From BC diode (current I_BC_diode flows C->B, so it flows OUT of Collector to Base)
+    // Stamp for I_BC_diode:
     A(idx_c, idx_c) += G_BC_diode; // Vc coefficient
     A(idx_c, idx_b) -= G_BC_diode; // Vb coefficient
-    b(idx_c) += I_BC_eq;           // Equivalent current source (positive since current flows OUT)
+    b(idx_c) += I_BC_eq;           // Equivalent current source (current flows OUT of node)
 
     // From controlled current source (I_C_controlled_actual flows E->C, so it flows INTO Collector from Emitter)
+    // Stamp for I_C_controlled_actual:
     A(idx_c, idx_e) += gm_val; // Ve coefficient (for Veb = Ve - Vb, so gm * Ve)
     A(idx_c, idx_b) -= gm_val; // Vb coefficient (for Veb = Ve - Vb, so -gm * Vb)
-    b(idx_c) -= I_C_controlled_eq; // Equivalent current source (negative since current flows INTO)
+    b(idx_c) -= I_C_controlled_eq; // Equivalent current source (current flows INTO node)
+
 
     // KCL at Emitter node (idx_e)
     // From BE diode (current I_BE_diode flows E->B, so it flows OUT of Emitter to Base)
+    // Stamp for I_BE_diode:
     A(idx_e, idx_e) += G_BE_diode; // Ve coefficient
     A(idx_e, idx_b) -= G_BE_diode; // Vb coefficient
-    b(idx_e) += I_BE_eq;           // Equivalent current source (positive since current flows OUT)
+    b(idx_e) += I_BE_eq;           // Equivalent current source (current flows OUT of node)
 
     // From controlled current source (I_C_controlled_actual flows E->C, so it flows OUT of Emitter to Collector)
+    // Stamp for I_C_controlled_actual:
     A(idx_e, idx_b) += gm_val; // Vb coefficient (for Veb = Ve - Vb, so gm * (-Vb))
     A(idx_e, idx_e) -= gm_val; // Ve coefficient (for Veb = Ve - Vb, so -gm * Ve)
-    b(idx_e) += I_C_controlled_eq; // Equivalent current source (positive since current flows OUT)
+    b(idx_e) += I_C_controlled_eq; // Equivalent current source (current flows OUT of node)
 }
 
 /**
