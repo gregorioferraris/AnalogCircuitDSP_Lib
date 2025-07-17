@@ -1,298 +1,388 @@
-// components/PNP_BJT.cpp
-#include "PNP_BJT.h"
-#include <iostream> // For error messages
-#include <cmath>    // For std::exp, std::fabs
+// components/MOSFET.cpp
+#include "MOSFET.h"
+#include <iostream> // For error messages and debugging output
 #include <algorithm> // For std::max, std::min
+#include <cmath> // For std::sqrt, std::abs
 
-// Define a small epsilon for numerical stability
-const double BJT_EPSILON = 1e-9; // Small voltage difference for numerical stability
+// Define a small epsilon for numerical stability, especially for derivatives near boundaries
+const double EPSILON = 1e-9; // Small voltage difference for numerical stability
 
 /**
- * @brief Constructor for the PNP_BJT component.
+ * @brief Constructor for the MOSFET component.
  *
- * Initializes a PNP BJT with its name, three connected nodes (Base, Collector, Emitter),
- * and key parameters for the Ebers-Moll model.
+ * Initializes a MOSFET with its name, four connected nodes (Drain, Gate, Source, Bulk),
+ * and key SPICE Level 1 model parameters.
  *
- * @param name The unique name of the BJT.
- * @param node_base The name of the Base node.
- * @param node_collector The name of the Collector node.
- * @param node_emitter The name of the Emitter node.
- * @param Is The saturation current (Amps). Must be > 0.
- * @param beta_F The forward common-emitter current gain (Beta_F). Must be > 0.
- * @param Vt The thermal voltage (Volts). Default is 0.02585V (approx at 300K). Must be > 0.
- * @param ideality_factor The ideality factor (n). Must be > 0.
- * @param tolerance_percent Optional tolerance percentage.
+ * @param name The unique name of the MOSFET.
+ * @param drain_node The name of the Drain node.
+ * @param gate_node The name of the Gate node.
+ * @param source_node The name of the Source node.
+ * @param bulk_node The name of the Bulk/Body node.
+ * @param type The type of MOSFET ("NMOS" or "PMOS").
+ * @param kp Transconductance parameter (k' = mu_n * C_ox) in A/V^2.
+ * @param vt0 Zero-bias threshold voltage (Vth0) in V.
+ * @param lambda Channel-length modulation parameter (lambda) in V^-1.
+ * @param gamma Bulk threshold parameter (gamma) in V^(1/2).
+ * @param phi Surface potential (phi) in V.
+ * @param W Channel width in meters.
+ * @param L Channel length in meters.
+ * @param tolerance_percent Optional tolerance percentage (inherited from Component).
  */
-PNP_BJT::PNP_BJT(const std::string& name,
-                 const std::string& node_base, const std::string& node_collector, const std::string& node_emitter,
-                 double Is, double beta_F, double Vt, double ideality_factor, double tolerance_percent)
-    // The base Component constructor takes node1 and node2.
-    // For a 3-terminal device, we can map node1 to Base and node2 to Emitter for the base class,
-    // and handle node_collector separately. The base Component's node1 and node2
-    // are not strictly used for the BJT's internal connections, but for its
-    // overall presence in the circuit's node list.
-    : Component(name, node_base, node_emitter, tolerance_percent), // node1=base, node2=emitter
-      node_base_name(node_base), node_collector_name(node_collector), node_emitter_name(node_emitter),
-      Is_(Is), beta_F_(beta_F), Vt_(Vt), ideality_factor_(ideality_factor)
+MOSFET::MOSFET(const std::string& name,
+               const std::string& drain_node, const std::string& gate_node,
+               const std::string& source_node, const std::string& bulk_node,
+               const std::string& type,
+               double kp, double vt0, double lambda, double gamma, double phi,
+               double W, double L,
+               double tolerance_percent)
+    : Component(name, drain_node, gate_node, tolerance_percent), // Using drain and gate as primary nodes for Component base
+      type(type), kp(kp), vt0(vt0), lambda(lambda), gamma(gamma), phi(phi), W(W), L(L),
+      drain_node_name(drain_node), gate_node_name(gate_node),
+      source_node_name(source_node), bulk_node_name(bulk_node)
 {
-    // A BJT introduces two auxiliary variables for its internal diode currents (Ibe, Ibc)
-    // or one for the collector current if using a simplified model.
-    // For a full Ebers-Moll companion model, we often use controlled sources,
-    // which don't necessarily require auxiliary variables if stamped directly.
-    // However, if modeling internal diodes as separate branches, they might.
-    // Let's assume for now that the stamping will be direct using conductances and current sources.
-    setNumAuxiliaryVariables(0); // No explicit auxiliary variables for this model (currents are derived)
+    // MOSFETs do not typically add auxiliary variables for their current,
+    // as their non-linear current source is directly integrated into KCL equations.
+    setNumAuxiliaryVariables(0);
 
-    // Add the collector node to the list of nodes managed by the component.
-    // This is crucial for getNodeIndex to work correctly for the collector node.
-    addNode(node_collector);
+    // Effective channel length (assuming no lateral diffusion LD for simplicity in Level 1)
+    // If LD was a parameter, Leff = L - 2 * LD;
+    Leff = L; // For simplicity, assume Leff = L if LD is not provided.
 
-    // Ensure parameters are reasonable
-    if (Is_ <= 0) Is_ = 1e-15; // Small positive value
-    if (beta_F_ <= 0) beta_F_ = 100.0; // Default beta
-    if (Vt_ <= 0) Vt_ = 0.02585; // Thermal voltage at 300K
-    if (ideality_factor_ <= 0) ideality_factor_ = 1.0;
-
-    std::cout << "PNP_BJT " << name << " initialized. B:" << node_base << " C:" << node_collector << " E:" << node_emitter << "." << std::endl;
-}
-
-/**
- * @brief Placeholder for processing a single audio sample (not used in MNA stamping).
- *
- * This method is inherited from Component but is not directly used when the BJT
- * is integrated via MNA stamps. Its purpose would be for a simpler "effect" model.
- *
- * @param input_sample The input sample.
- * @return A dummy value (0.0) as this model is for MNA.
- */
-double PNP_BJT::process(double input_sample) {
-    // This method is not used for MNA stamping.
-    // The actual current calculation happens in getStamps based on node voltages.
-    return 0.0;
-}
-
-/**
- * @brief Calculates the diode current for a PN junction.
- * @param V The voltage across the diode.
- * @param Is The saturation current.
- * @param Vt The thermal voltage.
- * @param n The ideality factor.
- * @return The diode current.
- */
-double PNP_BJT::calculateDiodeCurrent(double V, double Is, double Vt, double n) const {
-    double exp_arg = V / (n * Vt);
-
-    // Clamp the exponential argument to prevent numerical overflow/underflow.
-    // For very large positive V, exp_arg can be huge. For very large negative V, it can be very small.
-    const double MAX_EXP_ARG = 30.0; // Corresponds to V ~ 0.77V for n=1, Vt=0.02585V
-    const double MIN_EXP_ARG = -30.0; // Corresponds to V ~ -0.77V for n=1, Vt=0.02585V
-
-    if (exp_arg > MAX_EXP_ARG) {
-        exp_arg = MAX_EXP_ARG;
-    } else if (exp_arg < MIN_EXP_ARG) {
-        exp_arg = MIN_EXP_ARG;
+    // Basic validation for parameters
+    if (kp <= 0 || W <= 0 || L <= 0 || phi <= 0) {
+        std::cerr << "Warning: MOSFET " << name << " has invalid (non-positive) model parameters (kp, W, L, phi)." << std::endl;
+        // Consider setting default valid values or throwing an exception
+    }
+    if (type != "NMOS" && type != "PMOS") {
+        std::cerr << "Warning: MOSFET " << name << " has an invalid type. Must be 'NMOS' or 'PMOS'." << std::endl;
     }
 
-    return Is * (std::exp(exp_arg) - 1.0);
+    std::cout << "MOSFET " << name << " initialized (" << type << ", W/L=" << W/L << "). D:" << drain_node << " G:" << gate_node << " S:" << source_node << " B:" << bulk_node << std::endl;
 }
 
 /**
- * @brief Calculates the small-signal conductance (transconductance) of a diode.
- * g = dI/dV = (Is / (n*Vt)) * exp(V / (n*Vt))
- * @param V The voltage across the diode.
- * @param Is The saturation current.
- * @param Vt The thermal voltage.
- * @param n The ideality factor.
- * @return The diode conductance.
+ * @brief Calculates the threshold voltage (Vth) considering the body effect.
+ * Vth = Vth0 + gamma * (sqrt(2*phi + Vsb) - sqrt(2*phi))
+ * @param Vsb The source-bulk voltage.
+ * @return The threshold voltage.
  */
-double PNP_BJT::calculateDiodeConductance(double V, double Is, double Vt, double n) const {
-    double exp_arg = V / (n * Vt);
+double MOSFET::calculateThresholdVoltage(double Vsb) const {
+    if (type == "NMOS") {
+        // For NMOS, Vsb should be >= 0 for sqrt to be real. If Vsb < 0, it's forward biased,
+        // but the model typically assumes Vsb >= 0.
+        // Clamp Vsb to prevent sqrt of negative numbers, though ideally Vsb should be positive for NMOS.
+        double Vsb_clamped = std::max(0.0, Vsb);
+        return vt0 + gamma * (std::sqrt(2 * phi + Vsb_clamped) - std::sqrt(2 * phi));
+    } else { // PMOS
+        // For PMOS, Vsb is typically negative. Vbs is positive.
+        // Vth = Vth0 - gamma * (sqrt(2*phi - Vbs) - sqrt(2*phi))
+        // Or, using Vsb: Vth = Vth0 + gamma * (sqrt(2*phi - Vsb) - sqrt(2*phi))
+        // The body effect for PMOS is usually Vth = Vth0 - gamma * (sqrt(2*phi - Vbs) - sqrt(2*phi))
+        // where Vbs is positive. If Vsb is used, Vsb is negative.
+        // Using abs(Vbs) or -Vsb for PMOS body effect.
+        double Vbs_abs = std::abs(Vsb); // Vbs = -Vsb
+        double Vbs_clamped = std::max(0.0, Vbs_abs); // Ensure positive for sqrt
+        return vt0 - gamma * (std::sqrt(2 * phi + Vbs_clamped) - std::sqrt(2 * phi));
+    }
+}
 
-    // Clamp the exponential argument for derivative as well
-    const double MAX_EXP_ARG = 30.0;
-    const double MIN_EXP_ARG = -30.0;
+/**
+ * @brief Calculates the drain current (Id) based on operating region (SPICE Level 1).
+ * Assumes NMOS for calculations, PMOS would have inverted polarities.
+ * @param Vgs Gate-Source voltage.
+ * @param Vds Drain-Source voltage.
+ * @param Vth Threshold voltage.
+ * @return The drain current.
+ */
+double MOSFET::calculateDrainCurrent(double Vgs, double Vds, double Vth) const {
+    double id = 0.0;
+    double Vov = Vgs - Vth; // Overdrive voltage
 
-    if (exp_arg > MAX_EXP_ARG) {
-        exp_arg = MAX_EXP_ARG;
-    } else if (exp_arg < MIN_EXP_ARG) {
-        exp_arg = MIN_EXP_ARG;
+    if (type == "NMOS") {
+        if (Vgs <= Vth + EPSILON) { // Cutoff region
+            id = 0.0;
+        } else if (Vds < Vov - EPSILON) { // Triode (Linear) region
+            id = kp * (W / Leff) * (Vov * Vds - 0.5 * Vds * Vds) * (1.0 + lambda * Vds);
+        } else { // Saturation region (Vds >= Vov)
+            id = 0.5 * kp * (W / Leff) * Vov * Vov * (1.0 + lambda * Vds);
+        }
+    } else { // PMOS
+        // For PMOS, Vgs, Vds, Vth are typically negative or compared with negative values.
+        // It's often easier to work with absolute values or invert the logic.
+        // Let's use |Vgs|, |Vds|, |Vth| and invert the current direction.
+        double abs_Vgs = std::abs(Vgs);
+        double abs_Vds = std::abs(Vds);
+        double abs_Vth = std::abs(Vth); // Vth is usually negative for PMOS
+
+        // PMOS is ON when Vgs < Vth (i.e., |Vgs| > |Vth|)
+        // PMOS Triode when |Vds| < |Vgs - Vth|
+        // PMOS Saturation when |Vds| >= |Vgs - Vth|
+
+        if (Vgs >= Vth - EPSILON) { // Cutoff region (Vgs less negative than Vth)
+            id = 0.0;
+        } else if (Vds > Vov + EPSILON) { // Triode (Linear) region (Vds less negative than Vds_sat)
+            // Vds is negative, Vov is negative.
+            // Id = kp * (W/Leff) * (Vov * Vds - 0.5 * Vds * Vds) * (1.0 - lambda * Vds)
+            // Using abs values: Id = 0.5 * kp * (W/Leff) * (2*abs(Vov)*abs(Vds) - abs(Vds)*abs(Vds)) * (1.0 + lambda * abs(Vds))
+            // The SPICE model for PMOS usually uses the same equations but with |Vgs|, |Vds|, |Vth|
+            // and then multiplies by -1 for current direction.
+            id = kp * (W / Leff) * (Vov * Vds - 0.5 * Vds * Vds) * (1.0 - lambda * Vds); // Vds is negative, lambda*Vds becomes negative
+        } else { // Saturation region (Vds <= Vov)
+            id = 0.5 * kp * (W / Leff) * Vov * Vov * (1.0 - lambda * Vds);
+        }
+    }
+    return id;
+}
+
+/**
+ * @brief Calculates the output conductance (gds = d(Id)/d(Vds)).
+ * @param Vgs Gate-Source voltage.
+ * @param Vds Drain-Source voltage.
+ * @param Vth Threshold voltage.
+ * @return The output conductance.
+ */
+double MOSFET::calculateGDS(double Vgs, double Vds, double Vth) const {
+    double gds = 0.0;
+    double Vov = Vgs - Vth;
+
+    if (type == "NMOS") {
+        if (Vgs <= Vth + EPSILON) { // Cutoff
+            gds = 0.0;
+        } else if (Vds < Vov - EPSILON) { // Triode
+            gds = kp * (W / Leff) * (Vov - Vds + lambda * (2 * Vov * Vds - 1.5 * Vds * Vds));
+        } else { // Saturation
+            gds = 0.5 * kp * (W / Leff) * Vov * Vov * lambda;
+        }
+    } else { // PMOS
+        if (Vgs >= Vth - EPSILON) { // Cutoff
+            gds = 0.0;
+        } else if (Vds > Vov + EPSILON) { // Triode
+            // Derivative of kp * (W/Leff) * (Vov * Vds - 0.5 * Vds * Vds) * (1.0 - lambda * Vds) w.r.t Vds
+            // = K * [ (Vov - Vds)(1 - L*Vds) + (Vov*Vds - 0.5*Vds^2)(-L) ]
+            // = K * [ Vov - L*Vov*Vds - Vds + L*Vds^2 - L*Vov*Vds + 0.5*L*Vds^2 ]
+            // = K * [ Vov - Vds - 2*L*Vov*Vds + 1.5*L*Vds^2 ]
+            gds = kp * (W / Leff) * (Vov - Vds - 2 * lambda * Vov * Vds + 1.5 * lambda * Vds * Vds);
+        } else { // Saturation
+            gds = 0.5 * kp * (W / Leff) * Vov * Vov * (-lambda); // Note: -lambda for PMOS
+        }
+    }
+    return gds;
+}
+
+/**
+ * @brief Calculates the transconductance (gm = d(Id)/d(Vgs)).
+ * @param Vgs Gate-Source voltage.
+ * @param Vds Drain-Source voltage.
+ * @param Vth Threshold voltage.
+ * @return The transconductance.
+ */
+double MOSFET::calculateGM(double Vgs, double Vds, double Vth) const {
+    double gm = 0.0;
+    double Vov = Vgs - Vth;
+
+    if (type == "NMOS") {
+        if (Vgs <= Vth + EPSILON) { // Cutoff
+            gm = 0.0;
+        } else if (Vds < Vov - EPSILON) { // Triode
+            gm = kp * (W / Leff) * Vds * (1.0 + lambda * Vds);
+        } else { // Saturation
+            gm = kp * (W / Leff) * Vov * (1.0 + lambda * Vds);
+        }
+    } else { // PMOS
+        if (Vgs >= Vth - EPSILON) { // Cutoff
+            gm = 0.0;
+        } else if (Vds > Vov + EPSILON) { // Triode
+            // Derivative of kp * (W/Leff) * (Vov * Vds - 0.5 * Vds * Vds) * (1.0 - lambda * Vds) w.r.t Vgs
+            // Only Vov depends on Vgs. dVov/dVgs = 1.
+            gm = kp * (W / Leff) * Vds * (1.0 - lambda * Vds);
+        } else { // Saturation
+            gm = kp * (W / Leff) * Vov * (1.0 - lambda * Vds);
+        }
+    }
+    return gm;
+}
+
+/**
+ * @brief Calculates the bulk transconductance (gmb = d(Id)/d(Vbs)).
+ * This requires the derivative of Vth with respect to Vbs.
+ * gmb = -gm * d(Vth)/d(Vsb)
+ * @param Vgs Gate-Source voltage.
+ * @param Vds Drain-Source voltage.
+ * @param Vbs Bulk-Source voltage.
+ * @param Vth Threshold voltage.
+ * @return The bulk transconductance.
+ */
+double MOSFET::calculateGMB(double Vgs, double Vds, double Vbs, double Vth) const {
+    double gmb = 0.0;
+    double gm_val = calculateGM(Vgs, Vds, Vth); // Get current gm value
+
+    // Derivative of Vth with respect to Vsb (dVth/dVsb)
+    // dVth/dVsb = gamma / (2 * sqrt(2*phi + Vsb))
+    // For NMOS, Vsb = -Vbs. So dVth/dVbs = -dVth/dVsb.
+    // For PMOS, Vsb is negative, Vbs is positive. Vsb = -Vbs.
+    // The body effect term is gamma * (sqrt(2*phi + abs(Vsb)) - sqrt(2*phi))
+    // So d(sqrt(2*phi + abs(Vsb)))/d(Vbs) = d(sqrt(2*phi + Vbs))/d(Vbs) = 1 / (2 * sqrt(2*phi + Vbs))
+    // For NMOS: Vsb is typically positive. Vbs is negative.
+    // dVth/dVbs = -gamma / (2 * sqrt(2*phi + Vsb))
+    // For PMOS: Vsb is typically negative. Vbs is positive.
+    // dVth/dVbs = gamma / (2 * sqrt(2*phi + Vbs))
+    // Let's use Vsb directly for the derivative, and then relate to Vbs.
+    // Vsb is Source-Bulk voltage. Vbs is Bulk-Source voltage. Vsb = -Vbs.
+
+    double dVth_dVsb_magnitude = 0.0;
+    if (std::abs(2 * phi + Vsb) > EPSILON) { // Avoid division by zero
+        dVth_dVsb_magnitude = gamma / (2.0 * std::sqrt(std::abs(2 * phi + Vsb)));
     }
 
-    return (Is / (n * Vt)) * std::exp(exp_arg);
+    if (type == "NMOS") {
+        // For NMOS, Vsb is usually positive. If Vsb < 0 (forward bias), model might break.
+        // gmb = gm * dVth/dVsb * (-1) (since Vbs = -Vsb)
+        // dVth/dVsb = gamma / (2 * sqrt(2*phi + Vsb))
+        // gmb = gm * gamma / (2 * sqrt(2*phi + Vsb))
+        gmb = gm_val * dVth_dVsb_magnitude; // gmb = gm * dVth/dVbs_magnitude
+    } else { // PMOS
+        // For PMOS, Vsb is usually negative. Vbs is positive.
+        // Vth = Vth0 - gamma * (sqrt(2*phi + Vbs) - sqrt(2*phi))
+        // dVth/dVbs = -gamma / (2 * sqrt(2*phi + Vbs))
+        // gmb = -gm * dVth/dVbs = -gm * (-gamma / (2 * sqrt(2*phi + Vbs))) = gm * gamma / (2 * sqrt(2*phi + Vbs))
+        gmb = gm_val * dVth_dVsb_magnitude; // gmb = gm * dVth/dVbs_magnitude
+    }
+
+    return gmb;
 }
 
 
 /**
- * @brief Applies the stamps of the PNP BJT companion model to the MNA matrix (A) and vector (b).
+ * @brief Applies the stamps of the MOSFET companion model to the MNA matrix (A) and vector (b).
  *
- * This method implements a simplified Ebers-Moll model for the PNP BJT,
- * linearizing it for MNA using conductances and equivalent current sources.
+ * This method implements the non-linear companion model for the MOSFET.
+ * It calculates the drain current (Id) and small-signal conductances (gds, gm, gmb)
+ * based on the current guess of node voltages (x_current_guess).
+ * These values are then used to stamp the MNA matrix and vector for the current iteration.
  *
- * For a PNP BJT:
- * - Base-Emitter (BE) junction acts like a diode. Vbe = Vb - Ve.
- * - Base-Collector (BC) junction acts like a diode. Vbc = Vb - Vc.
+ * The companion model for a non-linear current source $I_D(V_{GS}, V_{DS}, V_{BS})$ is:
+ * $I_D \approx I_D(V_{GS0}, V_{DS0}, V_{BS0}) + g_m \Delta V_{GS} + g_{ds} \Delta V_{DS} + g_{mb} \Delta V_{BS}$
+ * where $\Delta V = V - V_0$.
+ * Rearranging for MNA:
+ * $I_D - g_m V_{GS} - g_{ds} V_{DS} - g_{mb} V_{BS} = I_D(V_0) - g_m V_{GS0} - g_{ds} V_{DS0} - g_{mb} V_{BS0}$
  *
- * Currents (simplified Ebers-Moll):
- * I_C = -alpha_F * I_F + I_R (Collector current, positive into collector)
- * I_E = I_F - alpha_R * I_R (Emitter current, positive into emitter)
- * I_B = I_F * (1 - alpha_F) + I_R * (1 - alpha_R) (Base current, positive into base)
+ * So, the terms to stamp are:
+ * - Conductances: $g_m$, $g_{ds}$, $g_{mb}$
+ * - Equivalent current source: $I_{eq} = I_D(V_0) - g_m V_{GS0} - g_{ds} V_{DS0} - g_{mb} V_{BS0}$
  *
- * Where:
- * I_F = Is * (exp(Vbe / Vt) - 1) (Forward current due to BE diode)
- * I_R = Is * (exp(Vbc / Vt) - 1) (Reverse current due to BC diode)
- * alpha_F = Beta_F / (1 + Beta_F) (Forward common-base current gain)
- * alpha_R = Beta_R / (1 + Beta_R) (Reverse common-base current gain, often assumed small or zero for simplified model)
+ * The KCL equations for the MOSFET (NMOS example):
+ * Node D: $+I_D = ...$
+ * Node G: $0 = ...$ (ideal gate, no current)
+ * Node S: $-I_D = ...$
+ * Node B: $0 = ...$ (ideal bulk, no current, unless bulk current is modeled)
  *
- * For a simplified model, often only the forward active region is considered:
- * I_C = -beta_F * I_B_diode (current flowing out of collector)
- * I_B = I_B_diode
- * where I_B_diode is the current through the BE junction.
- *
- * Let's use the standard companion model approach for the two diodes (BE and BC)
- * and then add the controlled source.
- *
- * Diode model: I = G_eq * V + I_eq
- * G_eq = dI/dV
- * I_eq = I_actual - G_eq * V_actual
- *
- * For PNP:
- * Vbe_curr = Vb_curr - Ve_curr
- * Vbc_curr = Vb_curr - Vc_curr
- *
- * Calculate currents and conductances for BE and BC diodes:
- * I_BE = Is_ * (exp(Veb_curr / (ideality_factor_ * Vt_)) - 1) where Veb_curr = Ve_curr - Vb_curr
- * G_BE = (Is_ / (ideality_factor_ * Vt_)) * exp(Veb_curr / (ideality_factor_ * Vt_))
- *
- * I_BC = Is_ * (exp(Vcb_curr / (ideality_factor_ * Vt_)) - 1) where Vcb_curr = Vc_curr - Vb_curr
- * G_BC = (Is_ / (ideality_factor_ * Vt_)) * exp(Vcb_curr / (ideality_factor_ * Vt_))
- *
- * Equivalent current sources:
- * I_BE_eq = I_BE - G_BE * Veb_curr
- * I_BC_eq = I_BC - G_BC * Vcb_curr
- *
- * Transconductance gm for PNP (current from Collector to Emitter controlled by Veb):
- * gm = d(Ic)/d(Veb) = beta_F * d(Ibe)/d(Veb) = beta_F * G_BE
- *
- * Now, apply stamps:
- * KCL at Base (idx_b):
- * - From BE diode (current I_BE_diode flows E->B, so it flows INTO Base from Emitter)
- * - From BC diode (current I_BC_diode flows C->B, so it flows INTO Base from Collector)
- *
- * KCL at Collector (idx_c):
- * - From BC diode (current I_BC_diode flows C->B, so it flows OUT of Collector to Base)
- * - From controlled current source (I_C_controlled_actual flows E->C, so it flows INTO Collector from Emitter)
- *
- * KCL at Emitter (idx_e):
- * - From BE diode (current I_BE_diode flows E->B, so it flows OUT of Emitter to Base)
- * - From controlled current source (I_C_controlled_actual flows E->C, so it flows OUT of Emitter to Collector)
+ * The current $I_D$ flows from Drain to Source.
  *
  * @param A The MNA matrix to which stamps are applied.
  * @param b The MNA right-hand side vector to which stamps are applied.
  * @param x_current_guess The current guess for node voltages and branch currents.
- * @param prev_solution The solution from the previous time step (not directly used here for static non-linearity).
+ * @param prev_solution The solution from the previous time step (not directly used here).
  * @param time The current simulation time (not used).
- * @param dt The time step size (not used for static non-linearity).
+ * @param dt The time step size (not used).
  */
-void PNP_BJT::getStamps(
+void MOSFET::getStamps(
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
     const Eigen::VectorXd& x_current_guess, const Eigen::VectorXd& prev_solution,
     double time, double dt
 ) {
-    // Get the global (1-based) indices for the BJT's nodes.
-    int idx_b = getNodeIndex(node_base_name);
-    int idx_c = getNodeIndex(node_collector_name);
-    int idx_e = getNodeIndex(node_emitter_name);
+    // Get the global indices for the MOSFET's nodes.
+    int idx_d = getNodeIndex(drain_node_name);
+    int idx_g = getNodeIndex(gate_node_name);
+    int idx_s = getNodeIndex(source_node_name);
+    int idx_b = getNodeIndex(bulk_node_name);
 
     // Ensure all node indices are valid
-    if (idx_b == -1 || idx_c == -1 || idx_e == -1) {
-        std::cerr << "Error: Invalid node index for PNP_BJT " << name << ". Check node names." << std::endl;
+    if (idx_d == -1 || idx_g == -1 || idx_s == -1 || idx_b == -1) {
+        std::cerr << "Error: Invalid node index for MOSFET " << name << ". Check node names." << std::endl;
         return;
     }
 
     // Get current guess voltages from x_current_guess
-    // Adjust for 0-based indexing if node 0 is ground
+    // Handle ground node (index 0) which has voltage 0
+    double Vd_curr = (idx_d == 0) ? 0.0 : x_current_guess(idx_d - 1); // Adjust for 0-based indexing if node 0 is ground
+    double Vg_curr = (idx_g == 0) ? 0.0 : x_current_guess(idx_g - 1);
+    double Vs_curr = (idx_s == 0) ? 0.0 : x_current_guess(idx_s - 1);
     double Vb_curr = (idx_b == 0) ? 0.0 : x_current_guess(idx_b - 1);
-    double Vc_curr = (idx_c == 0) ? 0.0 : x_current_guess(idx_c - 1);
-    double Ve_curr = (idx_e == 0) ? 0.0 : x_current_guess(idx_e - 1);
 
     // Calculate terminal voltages
-    double Veb_curr = Ve_curr - Vb_curr; // Emitter-Base voltage (positive for forward bias of BE diode)
-    double Vcb_curr = Vc_curr - Vb_curr; // Collector-Base voltage (positive for forward bias of BC diode)
+    double Vgs_curr = Vg_curr - Vs_curr;
+    double Vds_curr = Vd_curr - Vs_curr;
+    double Vbs_curr = Vb_curr - Vs_curr;
+    double Vsb_curr = Vs_curr - Vb_curr; // Source-Bulk voltage for Vth calculation
 
-    // --- BE Diode (Emitter-Base) ---
-    // Current I_BE_diode flows from Emitter to Base
-    double I_BE_diode = calculateDiodeCurrent(Veb_curr, Is_, Vt_, ideality_factor_);
-    double G_BE_diode = calculateDiodeConductance(Veb_curr, Is_, Vt_, ideality_factor_);
+    // Calculate threshold voltage with body effect
+    double Vth_curr = calculateThresholdVoltage(Vsb_curr);
 
-    // Equivalent current source for BE diode: I_eq = I_actual - G_eq * V_actual
-    double I_BE_eq = I_BE_diode - G_BE_diode * Veb_curr;
+    // Calculate drain current and small-signal conductances at current operating point
+    double Id_curr = calculateDrainCurrent(Vgs_curr, Vds_curr, Vth_curr);
+    double gds_val = calculateGDS(Vgs_curr, Vds_curr, Vth_curr);
+    double gm_val = calculateGM(Vgs_curr, Vds_curr, Vth_curr);
+    double gmb_val = calculateGMB(Vgs_curr, Vds_curr, Vbs_curr, Vth_curr);
 
-    // --- BC Diode (Collector-Base) ---
-    // Current I_BC_diode flows from Collector to Base
-    double I_BC_diode = calculateDiodeCurrent(Vcb_curr, Is_, Vt_, ideality_factor_);
-    double G_BC_diode = calculateDiodeConductance(Vcb_curr, Is_, Vt_, ideality_factor_);
-
-    // Equivalent current source for BC diode
-    double I_BC_eq = I_BC_diode - G_BC_diode * Vcb_curr;
-
-    // --- Controlled Current Source (Collector Current) ---
-    // In forward active region, Ic = beta_F * I_BE_diode (current from Emitter to Collector)
-    // This current is controlled by Veb.
-    // I_C_controlled_actual = beta_F_ * I_BE_diode
-    // Transconductance gm = d(I_C_controlled_actual)/d(Veb) = beta_F_ * G_BE_diode
-
-    double I_C_controlled_actual = beta_F_ * I_BE_diode; // Current from Emitter to Collector
-    double gm_val = beta_F_ * G_BE_diode; // Transconductance from Veb to Ic
-
-    // Equivalent current source for the controlled collector current
-    double I_C_controlled_eq = I_C_controlled_actual - gm_val * Veb_curr;
-
-    // --- Apply MNA stamps ---
-
-    // KCL at Base node (idx_b)
-    // From BE diode (current I_BE_diode flows E->B, so it flows INTO Base from Emitter)
-    // I_B = I_BE_diode + I_BC_diode
-    // Stamp for I_BE_diode:
-    A(idx_b, idx_b) += G_BE_diode; // Vb coefficient
-    A(idx_b, idx_e) -= G_BE_diode; // Ve coefficient
-    b(idx_b) -= I_BE_eq;           // Equivalent current source (current flows INTO node)
-
-    // Stamp for I_BC_diode:
-    A(idx_b, idx_b) += G_BC_diode; // Vb coefficient
-    A(idx_b, idx_c) -= G_BC_diode; // Vc coefficient
-    b(idx_b) -= I_BC_eq;           // Equivalent current source (current flows INTO node)
+    // Adjust for PMOS: current direction is reversed, and some conductances might be too.
+    // For PMOS, Id flows from Source to Drain.
+    // The SPICE model equations are typically written for NMOS, and then applied to PMOS
+    // by swapping D/S, using |Vgs|, |Vds|, |Vth|, and then inverting current.
+    // Here, we calculate Id as if it's NMOS, and then reverse the stamp if PMOS.
+    if (type == "PMOS") {
+        // Id is calculated based on Vgs, Vds, Vth (which are negative for PMOS).
+        // The current Id is positive if it flows from Source to Drain.
+        // Our calculateDrainCurrent returns a value that is positive for NMOS in typical operation.
+        // For PMOS, if Vgs < Vth (e.g., -2V < -1V), it's ON.
+        // If Vds < Vgs - Vth (e.g., -3V < -2V - (-1V) = -1V), it's triode.
+        // The current will be negative according to our NMOS-like calculation,
+        // so we use its absolute value for the source-drain current, and then stamp accordingly.
+        Id_curr = -Id_curr; // Id flows from Source to Drain for PMOS
+    }
 
 
-    // KCL at Collector node (idx_c)
-    // From BC diode (current I_BC_diode flows C->B, so it flows OUT of Collector to Base)
-    // Stamp for I_BC_diode:
-    A(idx_c, idx_c) += G_BC_diode; // Vc coefficient
-    A(idx_c, idx_b) -= G_BC_diode; // Vb coefficient
-    b(idx_c) += I_BC_eq;           // Equivalent current source (current flows OUT of node)
+    // Apply stamps to the MNA matrix A and vector b
+    // The MOSFET stamps are:
+    // KCL at Drain: +Id_curr - gds*Vds_curr - gm*Vgs_curr - gmb*Vbs_curr
+    // KCL at Source: -Id_curr + gds*Vds_curr + gm*Vgs_curr + gmb*Vbs_curr
+    // The companion model current source I_eq = Id_curr - gds*Vds_curr - gm*Vgs_curr - gmb*Vbs_curr
+    // This I_eq is added to the RHS of the KCL equation for the Drain node, and subtracted from Source.
 
-    // From controlled current source (I_C_controlled_actual flows E->C, so it flows INTO Collector from Emitter)
-    // Stamp for I_C_controlled_actual:
-    A(idx_c, idx_e) += gm_val; // Ve coefficient (for Veb = Ve - Vb, so gm * Ve)
-    A(idx_c, idx_b) -= gm_val; // Vb coefficient (for Veb = Ve - Vb, so -gm * Vb)
-    b(idx_c) -= I_C_controlled_eq; // Equivalent current source (current flows INTO node)
+    // KCL at Drain node (idx_d)
+    // Add gds * Vd
+    A(idx_d, idx_d) += gds_val;
+    // Add gm * Vg
+    A(idx_d, idx_g) += gm_val;
+    // Add gmb * Vb
+    A(idx_d, idx_b) += gmb_val;
+    // Subtract (gds + gm + gmb) * Vs (since Vds = Vd-Vs, Vgs = Vg-Vs, Vbs = Vb-Vs)
+    A(idx_d, idx_s) -= (gds_val + gm_val + gmb_val);
 
+    // KCL at Source node (idx_s)
+    // Subtract gds * Vd
+    A(idx_s, idx_d) -= gds_val;
+    // Subtract gm * Vg
+    A(idx_s, idx_g) -= gm_val;
+    // Subtract gmb * Vb
+    A(idx_s, idx_b) -= gmb_val;
+    // Add (gds + gm + gmb) * Vs
+    A(idx_s, idx_s) += (gds_val + gm_val + gmb_val);
 
-    // KCL at Emitter node (idx_e)
-    // From BE diode (current I_BE_diode flows E->B, so it flows OUT of Emitter to Base)
-    // Stamp for I_BE_diode:
-    A(idx_e, idx_e) += G_BE_diode; // Ve coefficient
-    A(idx_e, idx_b) -= G_BE_diode; // Vb coefficient
-    b(idx_e) += I_BE_eq;           // Equivalent current source (current flows OUT of node)
+    // Calculate the equivalent current source for the RHS vector b
+    // I_eq = Id_curr - gds*Vds_curr - gm*Vgs_curr - gmb*Vbs_curr
+    double I_eq = Id_curr - gds_val * Vds_curr - gm_val * Vgs_curr - gmb_val * Vbs_curr;
 
-    // From controlled current source (I_C_controlled_actual flows E->C, so it flows OUT of Emitter to Collector)
-    // Stamp for I_C_controlled_actual:
-    A(idx_e, idx_b) += gm_val; // Vb coefficient (for Veb = Ve - Vb, so gm * (-Vb))
-    A(idx_e, idx_e) -= gm_val; // Ve coefficient (for Veb = Ve - Vb, so -gm * Ve)
-    b(idx_e) += I_C_controlled_eq; // Equivalent current source (current flows OUT of node)
+    // Add I_eq to the RHS of the Drain KCL equation
+    b(idx_d) -= I_eq; // Current flows OUT of Drain for NMOS (or IN for PMOS if Id_curr is negative)
+    // Add -I_eq to the RHS of the Source KCL equation
+    b(idx_s) += I_eq; // Current flows IN to Source for NMOS (or OUT for PMOS if Id_curr is negative)
+
+    // Note: Gate and Bulk nodes are typically high impedance (no current contribution)
+    // unless gate leakage or junction diodes are modeled, which are not part of basic Level 1.
 }
 
 /**
- * @brief Updates the internal state of the PNP BJT.
+ * @brief Updates the internal state of the MOSFET.
  *
  * For a static non-linear model, there is no internal state to update
  * based on previous time steps. This method is empty.
@@ -300,6 +390,6 @@ void PNP_BJT::getStamps(
  * @param v_curr The current voltage across the component (not used).
  * @param i_curr The current flowing through the component (not used).
  */
-void PNP_BJT::updateState(double v_curr, double i_curr) {
+void MOSFET::updateState(double v_curr, double i_curr) {
     // No state to update for this static non-linear model.
 }
