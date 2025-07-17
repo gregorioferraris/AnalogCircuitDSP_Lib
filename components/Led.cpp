@@ -82,9 +82,12 @@ void Led::getStamps(
     int idx1 = getNodeIndex(node1); // Anode node index
     int idx2 = getNodeIndex(node2); // Cathode node index
 
+    // Handle ground node (index 0) which has voltage 0
+    double V1_curr = (idx1 == 0) ? 0.0 : x_current_guess(idx1 - 1);
+    double V2_curr = (idx2 == 0) ? 0.0 : x_current_guess(idx2 - 1);
+
     // Calculate the voltage across the LED (V_anode - V_cathode) based on the current guess.
-    // This is the voltage across the component's terminals.
-    double V_LED_guess = x_current_guess(idx1) - x_current_guess(idx2);
+    double V_LED_guess = V1_curr - V2_curr;
 
     // Calculate the argument for the exponential function in the smoothed model.
     double arg = LED_SHARPNESS_FACTOR * (V_LED_guess - Vf);
@@ -113,5 +116,35 @@ void Led::getStamps(
     // Apply the stamps to the MNA matrix A and vector b.
     // These stamps represent the linearized contribution of the non-linear LED.
     // The general form for a non-linear current I_NL(V_1 - V_2) is:
-    // A(idx1, idx1) += g_NL
-    // A(idx2, id
+    // KCL at node 1: +I_NL
+    // KCL at node 2: -I_NL
+    // Companion model: I_NL = g_NL * (V1 - V2) + I_eq
+    // where I_eq = I_NL(V_guess) - g_NL * (V1_guess - V2_guess)
+
+    // KCL at anode node (idx1)
+    if (idx1 != 0) {
+        A(idx1, idx1) += g_LED;
+        if (idx2 != 0) A(idx1, idx2) -= g_LED;
+        b(idx1) -= (I_LED - g_LED * V_LED_guess);
+    }
+
+    // KCL at cathode node (idx2)
+    if (idx2 != 0) {
+        A(idx2, idx2) += g_LED;
+        if (idx1 != 0) A(idx2, idx1) -= g_LED;
+        b(idx2) += (I_LED - g_LED * V_LED_guess);
+    }
+}
+
+/**
+ * @brief Updates the internal state of the LED.
+ *
+ * For this static non-linear model, there is no internal state to update
+ * based on previous time steps. This method is empty.
+ *
+ * @param v_curr The current voltage across the component (not used).
+ * @param i_curr The current flowing through the component (not used).
+ */
+void Led::updateState(double v_curr, double i_curr) {
+    // No state to update for this static non-linear model.
+}
