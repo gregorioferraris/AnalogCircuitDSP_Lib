@@ -1,6 +1,7 @@
 // File: SchottkyDiode.cpp
 #include "SchottkyDiode.h"
 #include <algorithm> // For std::max (though not strictly used in final version, good to keep)
+#include <cmath>     // For std::atan
 
 /**
  * @brief Implementation of the SchottkyDiode class constructor.
@@ -53,15 +54,4 @@ double SchottkyDiode::process(double input_sample) {
             // Use std::atan to create a soft "knee" in the conduction curve.
             // The 'softness_' controls the slope and softness of the knee.
             // We multiply by 'softness_' to keep the amplitude proportional
-            // to the input for small signals above the threshold.
-            output_signal = softness_ * std::atan(signal_above_threshold / softness_);
-        } else {
-            // The signal is positive but not sufficient to overcome the conduction threshold.
-            // Output is zero or very small.
-            output_signal = 0.0;
-        }
-    }
-    // If input_sample <= 0, output_signal remains 0.0 (diode blocks reverse current).
-
-    return output_signal;
-}
+            // to the input for small signals above the thresho
