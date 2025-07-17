@@ -1,89 +1,105 @@
-// File: Pentode.cpp
-#include "Pentode.h"
-#include <algorithm> // Per std::max
+// components/Pentode.h
+#ifndef PENTODE_H
+#define PENTODE_H
+
+#include "Component.h" // Include la classe base Component
+#include <Eigen/Dense>   // Per le operazioni con matrici e vettori Eigen
+#include <string>        // Per std::string
+#include <vector>        // Per std::vector
+#include <map>           // Per std::map (per getNodeIndex)
 
 /**
- * @brief Implementazione del costruttore della classe Pentode.
- * @param name Nome del componente.
- * @param input_node Nome del nodo di ingresso.
- * @param output_node Nome del nodo di uscita.
- * @param ground_node Nome del nodo di massa.
- * @param gain Fattore di guadagno lineare.
- * @param saturation_level Livello di ingresso a cui inizia la saturazione.
- * @param cutoff_threshold Livello di ingresso sotto il quale il segnale viene tagliato.
- * @param output_dc_offset Offset DC aggiunto all'uscita.
- * @param knee_factor Fattore che influenza la "durezza" della curva di saturazione.
- */
-Pentode::Pentode(const std::string& name, const std::string& input_node, const std::string& output_node,
-                 const std::string& ground_node, double gain, double saturation_level,
-                 double cutoff_threshold, double output_dc_offset, double knee_factor)
-    : Component(name, input_node, output_node, ground_node), // Chiama il costruttore della classe base
-      gain_(gain),
-      saturation_level_(saturation_level),
-      cutoff_threshold_(cutoff_threshold),
-      output_dc_offset_(output_dc_offset),
-      knee_factor_(knee_factor)
-{
-    // Assicurati che il livello di saturazione sia positivo per evitare divisioni per zero o NaN.
-    if (saturation_level_ <= 0) {
-        saturation_level_ = 1e-6; // Imposta un valore piccolo positivo di default
-    }
-    // Assicurati che il fattore knee sia positivo per evitare problemi con pow.
-    if (knee_factor_ <= 0) {
-        knee_factor_ = 1.0; // Imposta un valore di default
-    }
-}
-
-/**
- * @brief Processa un singolo campione audio attraverso il modello del pentodo.
+ * @class Pentode
+ * @brief Rappresenta un componente pentodo per simulazioni di circuiti MNA.
  *
- * Il modello applica le seguenti fasi di elaborazione:
- * 1.  **Cutoff:** Se il segnale di ingresso è al di sotto della `cutoff_threshold_`,
- * viene limitato a quel valore, simulando il comportamento di cutoff del pentodo.
- * 2.  **Guadagno Lineare:** Il segnale (al di sopra della soglia di cutoff) viene amplificato
- * dal fattore `gain_`.
- * 3.  **Saturazione con "Knee" Effect:** Viene applicata una funzione di saturazione più complessa
- * che combina `tanh` con una potenza, per simulare una compressione più aggressiva e
- * un effetto di "ginocchio" nella curva di distorsione, tipico dei pentodi.
- * 4.  **Offset DC:** Un valore `output_dc_offset_` viene aggiunto all'uscita finale
- * per simulare la tensione di placca a riposo del pentodo.
- *
- * @param input_sample Il campione di ingresso da processare (segnale AC).
- * @return Il campione processato (segnale AC con offset DC).
+ * Questa classe modella un pentodo con i suoi cinque terminali principali:
+ * Griglia di Controllo (Control Grid), Placca (Plate), Catodo (Cathode),
+ * Griglia Schermo (Screen Grid), e Griglia Soppressore (Suppressor Grid).
+ * Implementa i metodi per applicare gli "stamps" alla matrice MNA e al vettore RHS,
+ * utilizzando un modello non lineare semplificato adatto all'analisi transitoria
+ * con iterazione di Newton-Raphson.
  */
-double Pentode::process(double input_sample) {
-    double processed_signal = input_sample;
+class Pentode : public Component {
+public:
+    // Nomi dei nodi per i terminali del pentodo
+    std::string node_control_grid;
+    std::string node_plate;
+    std::string node_cathode;
+    std::string node_screen_grid;
+    std::string node_suppressor_grid;
 
-    // 1. Applica il cutoff
-    // Se l'input è sotto la soglia di cutoff, il pentodo non conduce efficacemente.
-    processed_signal = std::max(cutoff_threshold_, processed_signal);
+    // Parametri del modello semplificato del pentodo
+    double K_p_;        ///< Parametro di transconduttanza (simile a Kp in MOSFET)
+    double V_cutoff_;   ///< Tensione di cutoff della griglia di controllo
+    double lambda_;     ///< Parametro di modulazione della lunghezza del canale (per dipendenza dalla placca)
+    double mu_sg_;      ///< Fattore di amplificazione della griglia schermo (quanto Vsg influenza Iplate rispetto a Vcg)
+    double I_s_ratio_;  ///< Rapporto tra corrente di griglia schermo e corrente di placca (semplificato)
 
-    // Calcola il segnale effettivo al di sopra del cutoff
-    double signal_above_cutoff = processed_signal - cutoff_threshold_;
+    // Variabili di stato per l'iterazione di Newton-Raphson (tensioni del passo precedente)
+    // Queste sono le tensioni dei nodi calcolate all'iterazione precedente del Newton-Raphson.
+    double prev_Vcg_;   ///< Tensione precedente della griglia di controllo
+    double prev_Vp_;    ///< Tensione precedente della placca
+    double prev_Vsg_;   ///< Tensione precedente della griglia schermo
+    double prev_Vsup_;  ///< Tensione precedente della griglia soppressore
 
-    // 2. Applica il guadagno lineare
-    double amplified_signal = signal_above_cutoff * gain_;
+    /**
+     * @brief Costruttore per il componente Pentode.
+     * @param name Il nome univoco del pentodo.
+     * @param control_grid_node Il nome del nodo della griglia di controllo.
+     * @param plate_node Il nome del nodo della placca.
+     * @param cathode_node Il nome del nodo del catodo.
+     * @param screen_grid_node Il nome del nodo della griglia schermo.
+     * @param suppressor_grid_node Il nome del nodo della griglia soppressore.
+     * @param K_p Parametro di transconduttanza.
+     * @param V_cutoff Tensione di cutoff.
+     * @param lambda Parametro lambda per la modulazione della lunghezza del canale.
+     * @param mu_sg Fattore di amplificazione della griglia schermo.
+     * @param I_s_ratio Rapporto corrente griglia schermo/placca.
+     * @param tolerance_percent Percentuale di tolleranza opzionale.
+     */
+    Pentode(const std::string& name,
+            const std::string& control_grid_node, const std::string& plate_node,
+            const std::string& cathode_node, const std::string& screen_grid_node,
+            const std::string& suppressor_grid_node,
+            double K_p, double V_cutoff, double lambda, double mu_sg, double I_s_ratio,
+            double tolerance_percent = 0.0);
 
-    // 3. Saturazione con "Knee" Effect
-    // Usiamo una combinazione di tanh e una funzione di potenza per una saturazione più dura
-    // e un effetto di "ginocchio" (knee) nella curva.
-    double saturated_signal;
-    if (saturation_level_ > 0) {
-        // Normalizza l'input per la funzione di saturazione
-        double normalized_signal = amplified_signal / saturation_level_;
+    /**
+     * @brief Crea una copia profonda dell'oggetto Pentode.
+     * @return Un puntatore a un nuovo oggetto Pentode, che è una copia dell'istanza corrente.
+     */
+    Component* clone() const override { return new Pentode(*this); }
 
-        // Applica la funzione di saturazione con effetto "knee"
-        // tanh(x) fornisce una saturazione morbida, ma elevando a una potenza dispari
-        // si può rendere la curva più ripida e creare un effetto "knee".
-        // Per mantenere la simmetria, usiamo std::copysign per conservare il segno.
-        saturated_signal = saturation_level_ * std::copysign(std::pow(std::fabs(std::tanh(normalized_signal)), knee_factor_), normalized_signal);
-    } else {
-        saturated_signal = amplified_signal; // Nessuna saturazione se saturation_level_ è 0
-    }
+    /**
+     * @brief Applica gli "stamps" del pentodo alla matrice MNA (A) e al vettore (b).
+     *
+     * Questo metodo implementa un modello non lineare semplificato per il pentodo,
+     * calcolando le correnti di placca e griglia schermo e le loro conduttanze dinamiche
+     * per l'iterazione di Newton-Raphson.
+     *
+     * @param A La matrice MNA a cui vengono applicati gli stamps.
+     * @param b Il vettore lato destro MNA a cui vengono applicati gli stamps.
+     * @param x_current_guess La stima corrente per le tensioni dei nodi e le correnti di ramo.
+     * @param prev_solution La soluzione dal passo temporale precedente (non usata direttamente per il modello statico non lineare).
+     * @param time Il tempo di simulazione corrente.
+     * @param dt La dimensione del passo temporale.
+     */
+    void getStamps(
+        Eigen::MatrixXd& A, Eigen::VectorXd& b,
+        const Eigen::VectorXd& x_current_guess, const Eigen::VectorXd& prev_solution,
+        double time, double dt
+    ) override;
 
-    // 4. Aggiungi l'offset DC all'uscita
-    // Questo simula la tensione di placca a riposo del pentodo.
-    double final_output = saturated_signal + output_dc_offset_;
+    /**
+     * @brief Aggiorna lo stato interno del pentodo.
+     *
+     * Questo metodo memorizza le tensioni dei nodi attuali come "precedenti"
+     * per la prossima iterazione di Newton-Raphson nel metodo getStamps.
+     *
+     * @param v_curr La tensione corrente attraverso il componente (non usata direttamente).
+     * @param i_curr La corrente corrente che attraversa il componente (non usata direttamente).
+     */
+    void updateState(double v_curr, double i_curr) override;
+};
 
-    return final_output;
-}
+#endif // PENTODE_H
