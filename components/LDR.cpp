@@ -2,6 +2,15 @@
 #include "LDR.h"
 #include <iostream> // Per messaggi di errore
 #include <limits>   // Per std::numeric_limits
+#include <cmath>    // Per std::pow, std::abs
+
+// Placeholder for applyTolerance if Random.h is not available or desired.
+// In a real scenario, this would be a utility function or a member of a base class.
+double applyTolerance(double nominal_value, double tolerance_percent) {
+    // For simplicity, without Random.h, we return the nominal value.
+    // If you need actual tolerance, you'd add random variation here.
+    return nominal_value;
+}
 
 /**
  * @brief Costruttore per il componente LDR.
@@ -28,25 +37,25 @@ LDR::LDR(const std::string& name,
     setNumAuxiliaryVariables(0);
 
     // Validazione dei parametri di input
-    if (R0 <= 0.0) {
+    if (this->R0 <= 0.0) {
         std::cerr << "Attenzione: LDR " << name << " ha una resistenza di riferimento (R0) non positiva. Impostazione a 1000 Ohm." << std::endl;
         this->R0 = 1000.0;
     }
-    if (L0 <= 0.0) {
+    if (this->L0 <= 0.0) {
         std::cerr << "Attenzione: LDR " << name << " ha un'intensità luminosa di riferimento (L0) non positiva. Impostazione a 10 lux." << std::endl;
         this->L0 = 10.0;
     }
-    if (gamma <= 0.0) {
+    if (this->gamma <= 0.0) {
         std::cerr << "Attenzione: LDR " << name << " ha un coefficiente gamma non positivo. Impostazione a 0.7." << std::endl;
         this->gamma = 0.7;
     }
-    if (initial_light_intensity < 0.0) {
+    if (this->current_light_intensity < 0.0) {
         std::cerr << "Attenzione: LDR " << name << " ha un'intensità luminosa iniziale negativa. Impostazione a 0 lux." << std::endl;
         this->current_light_intensity = 0.0;
     }
 
-    std::cout << "LDR " << name << " inizializzato con R0=" << R0 << " Ohm, L0=" << L0
-              << " lux, gamma=" << gamma << ", luce iniziale=" << initial_light_intensity << " lux." << std::endl;
+    std::cout << "LDR " << name << " inizializzato con R0=" << this->R0 << " Ohm, L0=" << this->L0
+              << " lux, gamma=" << this->gamma << ", luce iniziale=" << this->current_light_intensity << " lux." << std::endl;
 }
 
 /**
@@ -101,10 +110,13 @@ void LDR::getStamps(
 
     // Applica lo stamp del resistore alla matrice MNA
     // Tra node1 e node2
-    A(idx1, idx1) += G;
-    A(idx2, idx2) += G;
-    A(idx1, idx2) -= G;
-    A(idx2, idx1) -= G;
+    // Se un nodo è la massa (ID 0), la sua riga/colonna non viene stampata.
+    if (idx1 != 0) A(idx1, idx1) += G;
+    if (idx2 != 0) A(idx2, idx2) += G;
+    if (idx1 != 0 && idx2 != 0) { // Applica i termini incrociati solo se entrambi i nodi non sono la massa
+        A(idx1, idx2) -= G;
+        A(idx2, idx1) -= G;
+    }
 }
 
 /**
@@ -123,4 +135,17 @@ void LDR::setLightIntensity(double light_intensity) {
     } else {
         this->current_light_intensity = light_intensity;
     }
+}
+
+/**
+ * @brief Aggiorna lo stato interno dell'LDR.
+ *
+ * Per questo modello statico, non c'è uno stato interno da aggiornare
+ * basato sui passi temporali precedenti. Questo metodo è vuoto.
+ *
+ * @param v_curr La tensione corrente attraverso il componente (non usata).
+ * @param i_curr La corrente corrente che attraversa il componente (non usata).
+ */
+void LDR::updateState(double v_curr, double i_curr) {
+    // Nessuno stato da aggiornare per questo componente.
 }
