@@ -3,8 +3,8 @@
 #define RESISTOR_H
 
 #include "Component.h" // Include la classe base Component
-#include <Eigen/Dense>   // Per le operazioni con matrici e vettori Eigen
 #include <string>        // Per std::string
+#include <vector>        // Per std::vector<std::string>
 
 /**
  * @class Resistor
@@ -15,18 +15,16 @@
  */
 class Resistor : public Component {
 public:
-    double R; // Valore della resistenza in Ohm
+    double resistance; // Valore della resistenza in Ohm
 
     /**
      * @brief Costruttore per il componente Resistor.
      * @param name Il nome univoco del resistore.
-     * @param node1 Il nome del primo nodo (terminale).
-     * @param node2 Il nome del secondo nodo (terminale).
-     * @param resistance Il valore della resistenza in Ohm.
-     * @param tolerance_percent Percentuale di tolleranza opzionale per il valore del componente.
+     * @param node_names_str Un vettore di stringhe contenente i nomi dei due nodi collegati.
+     * @param resistance_nominal Il valore nominale della resistenza in Ohm.
      */
-    Resistor(const std::string& name, const std::string& node1, const std::string& node2,
-             double resistance, double tolerance_percent = 0.0);
+    Resistor(const std::string& name, const std::vector<std::string>& node_names_str,
+             double resistance_nominal);
 
     /**
      * @brief Crea una copia profonda dell'oggetto Resistor.
@@ -35,21 +33,25 @@ public:
     Component* clone() const override { return new Resistor(*this); }
 
     /**
-     * @brief Applica gli "stamps" del resistore alla matrice MNA (A) e al vettore (b).
+     * @brief Applica gli "stamps" del resistore alla matrice MNA (A) e al vettore (B).
      *
      * Per un resistore, gli stamps sono costanti e lineari, basati sulla legge di Ohm.
      *
-     * @param A La matrice MNA a cui vengono applicati gli stamps.
-     * @param b Il vettore lato destro MNA a cui vengono applicati gli stamps.
-     * @param x_current_guess La stima corrente per le tensioni dei nodi e le correnti di ramo (non usata per i resistori lineari).
+     * @param num_total_equations Dimensione totale della matrice MNA.
+     * @param dt Passo temporale (non usato per i resistori statici).
+     * @param x Vettore della soluzione corrente (non usato per i resistori lineari).
      * @param prev_solution La soluzione dal passo temporale precedente (non usata per i resistori statici).
      * @param time Il tempo di simulazione corrente (non usato per i resistori statici).
-     * @param dt La dimensione del passo temporale (non usata per i resistori statici).
+     * @param A La matrice MNA a cui vengono applicati gli stamps.
+     * @param B Il vettore lato destro MNA a cui vengono applicati gli stamps.
      */
     void getStamps(
-        Eigen::MatrixXd& A, Eigen::VectorXd& b,
-        const Eigen::VectorXd& x_current_guess, const Eigen::VectorXd& prev_solution,
-        double time, double dt
+        int num_total_equations, double dt,
+        const std::vector<double>& x,
+        const std::vector<double>& prev_solution,
+        double time,
+        std::vector<std::vector<double>>& A,
+        std::vector<double>& B
     ) override;
 
     /**
@@ -58,10 +60,13 @@ public:
      * Per un resistore ideale, non c'è uno stato interno che evolve nel tempo.
      * Questo metodo è lasciato vuoto per questo modello.
      *
-     * @param v_curr La tensione corrente attraverso il componente.
-     * @param i_curr La corrente corrente che attraversa il componente.
+     * @param current_solution Il vettore della soluzione corrente (non usato).
+     * @param prev_solution Il vettore della soluzione precedente (non usato).
+     * @param dt Il passo temporale (non usato).
      */
-    void updateState(double v_curr, double i_curr) override;
+    void updateState(const std::vector<double>& current_solution,
+                     const std::vector<double>& prev_solution,
+                     double dt) override;
 };
 
 #endif // RESISTOR_H
