@@ -1,118 +1,137 @@
+// components/Diode.cpp
 #include "Diode.h"
-#include <iostream>
+#include <iostream> // Per messaggi di errore
+#include <limits>   // Per std::numeric_limits (per valori minimi/massimi)
 
-// Costruttore
-Diode::Diode(const std::string& name, const std::string& anode_node, const std::string& cathode_node,
-             double Is, double N, double Vt)
-    : Component(name, anode_node, cathode_node), Is_(Is), N_(N), Vt_(Vt)
+// Costante per limitare l'esponente per evitare overflow
+const double MAX_EXP_ARG = 700.0; // Circa ln(DBL_MAX)
+
+/**
+ * @brief Costruttore per il componente Diode.
+ * @param name Il nome univoco del diodo.
+ * @param node_names_str Un vettore di stringhe contenente i nomi dei due nodi (anodo, catodo).
+ * @param saturation_current La corrente di saturazione inversa (Is) in Ampere.
+ * @param emission_coefficient Il coefficiente di emissione (N).
+ * @param thermal_voltage La tensione termica (Vt) in Volt.
+ */
+Diode::Diode(const std::string& name, const std::vector<std::string>& node_names_str,
+             double saturation_current, double emission_coefficient, double thermal_voltage)
+    : Component(name, node_names_str),
+      Is(saturation_current),
+      N(emission_coefficient),
+      Vt(thermal_voltage)
 {
-    // Il costruttore della classe base Component gestisce l'inizializzazione dei nodi.
+    if (node_names_str.size() != 2) {
+        std::cerr << "Errore: Il diodo " << name_ << " deve avere esattamente due nodi (anodo, catodo)." << std::endl;
+        // Potresti voler lanciare un'eccezione o gestire l'errore in modo più robusto.
+    }
+    if (Is <= 0) {
+        std::cerr << "Attenzione: Corrente di saturazione (Is) non positiva per Diode " << name_ << ". Impostato a 1e-14 A." << std::endl;
+        Is = 1e-14; // Valore di default ragionevole
+    }
+    if (N <= 0) {
+        std::cerr << "Attenzione: Coefficiente di emissione (N) non positivo per Diode " << name_ << ". Impostato a 1.0." << std::endl;
+        N = 1.0; // Valore di default ragionevole
+    }
+    if (Vt <= 0) {
+        std::cerr << "Attenzione: Tensione termica (Vt) non positiva per Diode " << name_ << ". Impostato a 0.02585 V." << std::endl;
+        Vt = 0.02585; // Valore di default ragionevole
+    }
+    std::cout << "Diode " << name_ << " inizializzato (Is: " << Is << ", N: " << N << ", Vt: " << Vt << ")." << std::endl;
 }
 
-// Implementazione di calculateCurrent
-double Diode::calculateCurrent(double Vd) const {
-    double arg = Vd / (N_ * Vt_);
-    
-    // Limiti numerici per prevenire overflow/underflow in std::exp
-    // Equivalentemente a np.exp in Python
-    const double EXP_MAX_ARG = 700.0; // Valore approssimativo per std::exp che non causi overflow per double
-    const double EXP_MIN_ARG = -70.0; // Valore approssimativo per std::exp che non causi underflow significativo
-
-    if (arg > EXP_MAX_ARG) {
-        return Is_ * (std::exp(EXP_MAX_ARG) - 1.0);
-    } else if (arg < EXP_MIN_ARG) {
-        // In inversa profonda, la corrente tende a -Is
-        // Usiamo un piccolo valore per stabilità, ma è molto vicino a -Is
-        return -Is_; // Potrebbe anche essere Is_ * (std::exp(arg) - 1.0) se arg è solo < -70, ma non così piccolo da essere 0
-                     // Per arg < -70, exp(arg) è estremamente vicino a 0, quindi -Is è una buona approssimazione.
-    } else {
-        return Is_ * (std::exp(arg) - 1.0);
+/**
+ * @brief Funzione helper per calcolare la corrente del diodo.
+ * @param Vd La tensione attraverso il diodo (V_anodo - V_catodo).
+ * @return La corrente che scorre attraverso il diodo.
+ */
+double Diode::calculateDiodeCurrent(double Vd) const {
+    double arg = Vd / (N * Vt);
+    // Limita l'argomento dell'esponenziale per evitare overflow
+    if (arg > MAX_EXP_ARG) {
+        arg = MAX_EXP_ARG;
+    } else if (arg < -MAX_EXP_ARG) { // Anche per valori negativi molto grandi
+        arg = -MAX_EXP_ARG;
     }
+    return Is * (std::exp(arg) - 1.0);
 }
 
-// Implementazione di calculateConductance
-double Diode::calculateConductance(double Vd) const {
-    double arg = Vd / (N_ * Vt_);
-
-    const double EXP_MAX_ARG = 700.0;
-    const double SMALL_CONDUCTANCE = 1e-9; // Piccola conduttanza per stabilità in inversa
-
-    if (arg > EXP_MAX_ARG) {
-        // In forte conduzione, la conduttanza è molto alta
-        return Is_ / (N_ * Vt_) * std::exp(EXP_MAX_ARG);
-    } else if (arg < EXP_MIN_ARG) { // Utilizziamo lo stesso limite di EXP_MIN_ARG
-        // In inversa profonda, la conduttanza è molto piccola (quasi zero)
-        return SMALL_CONDUCTANCE; // Non esattamente zero per evitare divisioni per zero o problemi numerici
-    } else {
-        return Is_ / (N_ * Vt_) * std::exp(arg);
+/**
+ * @brief Applica gli "stamps" del diodo alla matrice MNA (A) e al vettore (B).
+ *
+ * Questo metodo implementa il modello di linearizzazione di Newton-Raphson per il diodo.
+ * Calcola la conduttanza incrementale (g) e la corrente equivalente (Ieq)
+ * basandosi sulla tensione del diodo dalla soluzione corrente (x).
+ *
+ * @param num_total_equations Dimensione totale della matrice MNA.
+ * @param dt Passo temporale (non usato direttamente per il diodo statico).
+ * @param x Vettore della soluzione corrente (tensione ai nodi per il calcolo di g e Ieq).
+ * @param prev_solution La soluzione dal passo temporale precedente (non usata per il diodo statico).
+ * @param time Il tempo di simulazione corrente (non usato per il diodo statico).
+ * @param A La matrice MNA a cui vengono applicati gli stamps.
+ * @param B Il vettore lato destro MNA a cui vengono applicati gli stamps.
+ */
+void Diode::getStamps(
+    int num_total_equations, double dt,
+    const std::vector<double>& x,
+    const std::vector<double>& prev_solution,
+    double time,
+    std::vector<std::vector<double>>& A,
+    std::vector<double>& B
+) {
+    if (node_ids_.size() != 2) {
+        std::cerr << "Errore: Diode " << name_ << " si aspetta 2 ID di nodo." << std::endl;
+        return;
     }
-}
+    int anode_id = node_ids_[0];
+    int cathode_id = node_ids_[1];
 
-// Implementazione di getStamps per il diodo
-void Diode::getStamps(Eigen::MatrixXd& stamp_A, Eigen::VectorXd& stamp_B,
-                   int num_total_equations, double dt,
-                   const Eigen::VectorXd& current_solution_guess,
-                   const Eigen::VectorXd& prev_solution,
-                   double time)
-{
-    // Verifica e ridimensiona/azzerra matrici se necessario (solitamente fatto dal solutore)
-    if (stamp_A.rows() != num_total_equations || stamp_A.cols() != num_total_equations) {
-        stamp_A = Eigen::MatrixXd::Zero(num_total_equations, num_total_equations);
-    }
-    if (stamp_B.size() != num_total_equations) {
-        stamp_B = Eigen::VectorXd::Zero(num_total_equations);
-    }
-
-    // Ottieni gli ID numerici dei nodi
-    if (node_ids.size() != 2 || node_ids[0] == -1 || node_ids[1] == -1) {
-        std::cerr << "Errore: ID dei nodi non validi per il diodo " << name << std::endl;
+    // Controlla la validità degli indici
+    if (anode_id < 0 || anode_id >= num_total_equations || cathode_id < 0 || cathode_id >= num_total_equations) {
+        std::cerr << "Errore: Indice di nodo non valido per Diode " << name_ << std::endl;
         return;
     }
 
-    int anode_id = node_ids[0];
-    int cathode_id = node_ids[1];
+    // Ottieni la tensione del diodo dalla soluzione corrente (x)
+    double V_anode = (anode_id != 0) ? x[anode_id] : 0.0;
+    double V_cathode = (cathode_id != 0) ? x[cathode_id] : 0.0;
+    double Vd = V_anode - V_cathode;
 
-    // Ottieni le tensioni correnti dai nodi della soluzione "current_solution_guess"
-    // current_solution_guess contiene le tensioni nodali e possibilmente correnti aggiuntive.
-    // Assumiamo che i primi 'num_nodes' elementi di current_solution_guess siano le tensioni nodali.
-    double V_anode = (anode_id != 0) ? current_solution_guess(anode_id) : 0.0;
-    double V_cathode = (cathode_id != 0) ? current_solution_guess(cathode_id) : 0.0;
+    // Calcola la corrente del diodo (Id) e la conduttanza incrementale (g)
+    double Id = calculateDiodeCurrent(Vd);
+    double g = Is / (N * Vt) * std::exp(Vd / (N * Vt)); // Derivata dId/dVd
 
-    double Vd = V_anode - V_cathode; // Tensione ai capi del diodo
-    double Id = calculateCurrent(Vd);     // Corrente del diodo
-    double Gd = calculateConductance(Vd); // Conduttanza dinamica del diodo
+    // Calcola la corrente equivalente per il modello di linearizzazione
+    // Ieq = Id - g * Vd
+    double Ieq = Id - g * Vd;
 
-    // Applica lo "stamp" del diodo al sistema di equazioni Newton-Raphson.
-    // Il contributo è dato dalla conduttanza dinamica e dalla corrente.
-    // L'equazione per un diodo in MNA è:
-    // I_diode(Vd) = Gd * Vd - I_diode(Vd) + Gd * Vd
-    // Questa forma è equivalente a:
-    // I_diode(Vd) = Gd * Vd + (Id - Gd * Vd)
-    // Dove (Id - Gd * Vd) è il termine di corrente equivalente per il metodo Newton-Raphson.
-
-    // Contributi alla matrice Jacobiana (stamp_A):
-    // La conduttanza Gd contribuisce ai termini diagonali e incrociati.
-    // Se Anodo e Catodo non sono massa (0)
-    if (anode_id != 0) {
-        stamp_A(anode_id, anode_id) += Gd;
-    }
-    if (cathode_id != 0) {
-        stamp_A(cathode_id, cathode_id) += Gd;
-    }
+    // Applica gli stamps alla matrice A e al vettore B
+    // Contributi alla matrice A (conduttanze)
+    if (anode_id != 0) A[anode_id][anode_id] += g;
+    if (cathode_id != 0) A[cathode_id][cathode_id] += g;
     if (anode_id != 0 && cathode_id != 0) {
-        stamp_A(anode_id, cathode_id) -= Gd;
-        stamp_A(cathode_id, anode_id) -= Gd;
+        A[anode_id][cathode_id] -= g;
+        A[cathode_id][anode_id] -= g;
     }
 
-    // Contributi al vettore del lato destro (stamp_B) (corrente di mancato equilibrio):
-    // Il termine Id - Gd * Vd viene sottratto dalle equazioni nodali.
-    // Ricorda che la corrente esce dal nodo positivo (anodo) ed entra nel negativo (catodo).
-    double current_contribution = Id - Gd * Vd;
+    // Contributi al vettore B (sorgenti di corrente equivalenti)
+    if (anode_id != 0) B[anode_id] -= Ieq; // Corrente che esce dall'anodo
+    if (cathode_id != 0) B[cathode_id] += Ieq; // Corrente che entra nel catodo
+}
 
-    if (anode_id != 0) {
-        stamp_B(anode_id) -= current_contribution;
-    }
-    if (cathode_id != 0) {
-        stamp_B(cathode_id) += current_contribution;
-    }
+/**
+ * @brief Aggiorna lo stato interno del diodo.
+ *
+ * Per un diodo ideale, non c'è uno stato interno che evolve nel tempo.
+ * Questo metodo è lasciato vuoto per questo modello.
+ *
+ * @param current_solution Il vettore della soluzione corrente (non usato).
+ * @param prev_solution Il vettore della soluzione precedente (non usato).
+ * @param dt Il passo temporale (non usato).
+ */
+void Diode::updateState(const std::vector<double>& current_solution,
+                     const std::vector<double>& prev_solution,
+                     double dt) {
+    // Nessuno stato interno da aggiornare per un diodo ideale.
+    // Questo metodo è intenzionalmente lasciato vuoto.
 }
