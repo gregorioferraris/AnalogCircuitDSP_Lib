@@ -100,3 +100,16 @@ void OpAmp::getStamps(
     // The right-hand side for this constraint equation is 0.
     b(idx_opamp_current_1based) += 0.0; // Explicitly adding 0.0 for clarity, though it's often implicitly 0.
 }
+
+/**
+ * @brief Updates the internal state of the OpAmp.
+ *
+ * For an ideal OpAmp, there is no internal state to update
+ * based on previous time steps. This method is empty.
+ *
+ * @param v_curr The current voltage across the component (not used).
+ * @param i_curr The current flowing through the component (not used).
+ */
+void OpAmp::updateState(double v_curr, double i_curr) {
+    // No state to update for this static non-linear model.
+}
